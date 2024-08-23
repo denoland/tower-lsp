@@ -1,17 +1,12 @@
 [package]
-name = "tower-lsp"
-version = "0.20.0"
-authors = ["Eyal Kalderon <ebkalderon@gmail.com>"]
+name = "deno_tower_lsp"
+version = "0.1.0"
+authors = ["Eyal Kalderon <ebkalderon@gmail.com>", "the Deno authors"]
 edition = "2021"
 rust-version = "1.70.0"
-description = "Language Server Protocol implementation based on Tower"
-license = "MIT OR Apache-2.0"
-homepage = "https://github.com/ebkalderon/tower-lsp"
-repository = "https://github.com/ebkalderon/tower-lsp"
-documentation = "https://docs.rs/tower-lsp/"
+description = "This is a fork of https://crates.io/crates/tower-lsp, used in Deno. At the moment only floating patches."
+license = "MIT"
 readme = "README.md"
-categories = ["asynchronous"]
-keywords = ["language-server", "lsp", "tower"]
 exclude = ["FEATURES.md"]
 
 [features]
