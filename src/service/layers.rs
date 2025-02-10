@@ -4,7 +4,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use futures::future::{self, BoxFuture, FutureExt};
+use futures::future::{self, FutureExt, LocalBoxFuture};
 use tower::{Layer, Service};
 use tracing::{info, warn};
 
@@ -51,11 +51,11 @@ pub struct InitializeService<S> {
 impl<S> Service<Request> for InitializeService<S>
 where
     S: Service<Request, Response = Option<Response>, Error = ExitedError>,
-    S::Future: Send + 'static,
+    S::Future: 'static,
 {
     type Response = S::Response;
     type Error = S::Error;
-    type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
+    type Future = LocalBoxFuture<'static, Result<Self::Response, Self::Error>>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         self.inner.poll_ready(cx)
@@ -120,11 +120,11 @@ pub struct ShutdownService<S> {
 impl<S> Service<Request> for ShutdownService<S>
 where
     S: Service<Request, Response = Option<Response>, Error = ExitedError>,
-    S::Future: Into<BoxFuture<'static, Result<Option<Response>, S::Error>>> + Send + 'static,
+    S::Future: Into<LocalBoxFuture<'static, Result<Option<Response>, S::Error>>> + 'static,
 {
     type Response = S::Response;
     type Error = S::Error;
-    type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
+    type Future = LocalBoxFuture<'static, Result<Self::Response, Self::Error>>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         self.inner.poll_ready(cx)
@@ -241,11 +241,11 @@ pub struct NormalService<S> {
 impl<S> Service<Request> for NormalService<S>
 where
     S: Service<Request, Response = Option<Response>, Error = ExitedError>,
-    S::Future: Into<BoxFuture<'static, Result<Option<Response>, S::Error>>> + Send + 'static,
+    S::Future: Into<LocalBoxFuture<'static, Result<Option<Response>, S::Error>>> + 'static,
 {
     type Response = S::Response;
     type Error = S::Error;
-    type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
+    type Future = LocalBoxFuture<'static, Result<Self::Response, Self::Error>>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         self.inner.poll_ready(cx)
@@ -281,11 +281,11 @@ impl<S> Cancellable<S> {
 impl<S> Service<Request> for Cancellable<S>
 where
     S: Service<Request, Response = Option<Response>, Error = ExitedError>,
-    S::Future: Send + 'static,
+    S::Future: 'static,
 {
     type Response = S::Response;
     type Error = S::Error;
-    type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
+    type Future = LocalBoxFuture<'static, Result<Self::Response, Self::Error>>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         self.inner.poll_ready(cx)
@@ -293,8 +293,8 @@ where
 
     fn call(&mut self, req: Request) -> Self::Future {
         match req.id().cloned() {
-            Some(id) => self.pending.execute(id, self.inner.call(req)).boxed(),
-            None => self.inner.call(req).boxed(),
+            Some(id) => self.pending.execute(id, self.inner.call(req)).boxed_local(),
+            None => self.inner.call(req).boxed_local(),
         }
     }
 }

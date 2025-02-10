@@ -43,7 +43,7 @@ impl Pending {
     /// If the same request ID is being waited upon in multiple locations, then the incoming
     /// response will be routed to one of the callers in a first come, first served basis. To
     /// ensure correct routing of JSON-RPC requests, each identifier value used _must_ be unique.
-    pub fn wait(&self, id: Id) -> impl Future<Output = Response> + Send + 'static {
+    pub fn wait(&self, id: Id) -> impl Future<Output = Response> + 'static {
         let (tx, rx) = oneshot::channel();
 
         match self.0.entry(id) {
@@ -63,6 +63,7 @@ impl Pending {
 
 impl Debug for Pending {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        #[allow(dead_code)]
         #[derive(Debug)]
         struct Waiters(usize);
 

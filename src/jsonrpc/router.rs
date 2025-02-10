@@ -8,10 +8,10 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use futures::future::{self, BoxFuture, FutureExt};
+use futures::future::{self, FutureExt, LocalBoxFuture};
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
-use tower::{util::BoxService, Layer, Service};
+use tower::{util::UnsyncBoxService, Layer, Service};
 
 use crate::jsonrpc::ErrorCode;
 
@@ -20,10 +20,10 @@ use super::{Error, Id, Request, Response};
 /// A modular JSON-RPC 2.0 request router service.
 pub struct Router<S, E = Infallible> {
     server: Arc<S>,
-    methods: HashMap<&'static str, BoxService<Request, Option<Response>, E>>,
+    methods: HashMap<&'static str, UnsyncBoxService<Request, Option<Response>, E>>,
 }
 
-impl<S: Send + Sync + 'static, E> Router<S, E> {
+impl<S: 'static, E> Router<S, E> {
     /// Creates a new `Router` with the given shared state.
     pub fn new(server: S) -> Self {
         Router {
@@ -44,10 +44,10 @@ impl<S: Send + Sync + 'static, E> Router<S, E> {
     where
         P: FromParams,
         R: IntoResponse,
-        F: for<'a> Method<&'a S, P, R> + Clone + Send + Sync + 'static,
+        F: for<'a> Method<&'a S, P, R> + Clone + 'static,
         L: Layer<MethodHandler<P, R, E>>,
-        L::Service: Service<Request, Response = Option<Response>, Error = E> + Send + 'static,
-        <L::Service as Service<Request>>::Future: Send + 'static,
+        L::Service: Service<Request, Response = Option<Response>, Error = E> + 'static,
+        <L::Service as Service<Request>>::Future: 'static,
     {
         let server = &self.server;
         self.methods.entry(name).or_insert_with(|| {
@@ -58,7 +58,7 @@ impl<S: Send + Sync + 'static, E> Router<S, E> {
                 async move { callback.invoke(&*server, params).await }
             });
 
-            BoxService::new(layer.layer(handler))
+            UnsyncBoxService::new(layer.layer(handler))
         });
 
         self
@@ -77,7 +77,7 @@ impl<S: Debug, E> Debug for Router<S, E> {
 impl<S, E: Send + 'static> Service<Request> for Router<S, E> {
     type Response = Option<Response>;
     type Error = E;
-    type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
+    type Future = LocalBoxFuture<'static, Result<Self::Response, Self::Error>>;
 
     fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
@@ -100,18 +100,18 @@ impl<S, E: Send + 'static> Service<Request> for Router<S, E> {
 
 /// Opaque JSON-RPC method handler.
 pub struct MethodHandler<P, R, E> {
-    f: Box<dyn Fn(P) -> BoxFuture<'static, R> + Send>,
+    f: Box<dyn Fn(P) -> LocalBoxFuture<'static, R>>,
     _marker: PhantomData<E>,
 }
 
 impl<P: FromParams, R: IntoResponse, E> MethodHandler<P, R, E> {
     fn new<F, Fut>(handler: F) -> Self
     where
-        F: Fn(P) -> Fut + Send + 'static,
-        Fut: Future<Output = R> + Send + 'static,
+        F: Fn(P) -> Fut + 'static,
+        Fut: Future<Output = R> + 'static,
     {
         MethodHandler {
-            f: Box::new(move |p| handler(p).boxed()),
+            f: Box::new(move |p| handler(p).boxed_local()),
             _marker: PhantomData,
         }
     }
@@ -125,7 +125,7 @@ where
 {
     type Response = Option<Response>;
     type Error = E;
-    type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
+    type Future = LocalBoxFuture<'static, Result<Self::Response, Self::Error>>;
 
     fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
@@ -142,12 +142,12 @@ where
 
         let params = match P::from_params(params) {
             Ok(params) => params,
-            Err(err) => return future::ok(id.map(|id| Response::from_error(id, err))).boxed(),
+            Err(err) => return future::ok(id.map(|id| Response::from_error(id, err))).boxed_local(),
         };
 
         (self.f)(params)
             .map(move |r| Ok(r.into_response(id)))
-            .boxed()
+            .boxed_local()
     }
 }
 
@@ -163,7 +163,7 @@ where
 /// `async fn f(&self, params: P)`                       | Notification with parameters
 pub trait Method<S, P, R>: private::Sealed {
     /// The future response value.
-    type Future: Future<Output = R> + Send;
+    type Future: Future<Output = R> ;
 
     /// Invokes the method with the given `server` receiver and parameters.
     fn invoke(&self, server: S, params: P) -> Self::Future;
@@ -173,7 +173,7 @@ pub trait Method<S, P, R>: private::Sealed {
 impl<F, S, R, Fut> Method<S, (), R> for F
 where
     F: Fn(S) -> Fut,
-    Fut: Future<Output = R> + Send,
+    Fut: Future<Output = R>,
 {
     type Future = Fut;
 
@@ -188,7 +188,7 @@ impl<F, S, P, R, Fut> Method<S, (P,), R> for F
 where
     F: Fn(S, P) -> Fut,
     P: DeserializeOwned,
-    Fut: Future<Output = R> + Send,
+    Fut: Future<Output = R> ,
 {
     type Future = Fut;
 
@@ -199,7 +199,7 @@ where
 }
 
 /// A trait implemented by all JSON-RPC method parameters.
-pub trait FromParams: private::Sealed + Send + Sized + 'static {
+pub trait FromParams: private::Sealed + Sized + 'static {
     /// Attempts to deserialize `Self` from the `params` value extracted from [`Request`].
     fn from_params(params: Option<Value>) -> super::Result<Self>;
 }
@@ -216,7 +216,7 @@ impl FromParams for () {
 }
 
 /// Deserialize required JSON-RPC parameters.
-impl<P: DeserializeOwned + Send + 'static> FromParams for (P,) {
+impl<P: DeserializeOwned + 'static> FromParams for (P,) {
     fn from_params(params: Option<Value>) -> super::Result<Self> {
         if let Some(p) = params {
             serde_json::from_value(p)
@@ -229,7 +229,7 @@ impl<P: DeserializeOwned + Send + 'static> FromParams for (P,) {
 }
 
 /// A trait implemented by all JSON-RPC response types.
-pub trait IntoResponse: private::Sealed + Send + 'static {
+pub trait IntoResponse: private::Sealed + 'static {
     /// Attempts to construct a [`Response`] using `Self` and a corresponding [`Id`].
     fn into_response(self, id: Option<Id>) -> Option<Response>;
 
@@ -250,7 +250,7 @@ impl IntoResponse for () {
 }
 
 /// Support JSON-RPC request methods.
-impl<R: Serialize + Send + 'static> IntoResponse for Result<R, Error> {
+impl<R: Serialize + 'static> IntoResponse for Result<R, Error> {
     fn into_response(self, id: Option<Id>) -> Option<Response> {
         debug_assert!(id.is_some(), "Requests always contain an `id` field");
         if let Some(id) = id {

@@ -28,9 +28,9 @@ impl Pending {
         &self,
         id: Id,
         fut: F,
-    ) -> impl Future<Output = Result<Option<Response>, ExitedError>> + Send + 'static
+    ) -> impl Future<Output = Result<Option<Response>, ExitedError>> + 'static
     where
-        F: Future<Output = Result<Option<Response>, ExitedError>> + Send + 'static,
+        F: Future<Output = Result<Option<Response>, ExitedError>> + 'static,
     {
         if let Entry::Vacant(entry) = self.0.entry(id.clone()) {
             let (handler_fut, abort_handle) = future::abortable(fut);

@@ -14,7 +14,7 @@
 //!     client: Client,
 //! }
 //!
-//! #[tower_lsp::async_trait]
+//! #[tower_lsp::async_trait(?Send)]
 //! impl LanguageServer for Backend {
 //!     async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
 //!         Ok(InitializeResult {
@@ -113,9 +113,9 @@ mod transport;
 ///
 /// [Language Server Protocol]: https://microsoft.github.io/language-server-protocol/
 #[rpc]
-#[async_trait]
+#[async_trait(?Send)]
 #[auto_impl(Arc, Box)]
-pub trait LanguageServer: Send + Sync + 'static {
+pub trait LanguageServer: 'static {
     /// The [`initialize`] request is the first request sent from the client to the server.
     ///
     /// [`initialize`]: https://microsoft.github.io/language-server-protocol/specification#initialize

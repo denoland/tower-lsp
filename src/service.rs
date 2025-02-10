@@ -9,7 +9,7 @@ use std::fmt::{self, Debug, Display, Formatter};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use futures::future::{self, BoxFuture, FutureExt};
+use futures::future::{self, FutureExt, LocalBoxFuture};
 use serde_json::Value;
 use tower::Service;
 
@@ -103,7 +103,7 @@ impl<S: LanguageServer> LspService<S> {
 impl<S: LanguageServer> Service<Request> for LspService<S> {
     type Response = Option<Response>;
     type Error = ExitedError;
-    type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
+    type Future = LocalBoxFuture<'static, Result<Self::Response, Self::Error>>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         match self.state.get() {
@@ -176,7 +176,7 @@ impl<S: LanguageServer> LspServiceBuilder<S> {
     /// struct Mock;
     ///
     /// // Implementation of `LanguageServer` omitted...
-    /// # #[tower_lsp::async_trait]
+    /// # #[tower_lsp::async_trait(?Send)]
     /// # impl LanguageServer for Mock {
     /// #     async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
     /// #         Ok(InitializeResult::default())
@@ -217,7 +217,7 @@ impl<S: LanguageServer> LspServiceBuilder<S> {
     where
         P: FromParams,
         R: IntoResponse,
-        F: for<'a> Method<&'a S, P, R> + Clone + Send + Sync + 'static,
+        F: for<'a> Method<&'a S, P, R> + Clone + 'static,
     {
         let layer = layers::Normal::new(self.state.clone(), self.pending.clone());
         self.inner.method(name, callback, layer);
@@ -259,7 +259,7 @@ mod tests {
     #[derive(Debug)]
     struct Mock;
 
-    #[async_trait]
+    #[async_trait(?Send)]
     impl LanguageServer for Mock {
         async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
             Ok(InitializeResult::default())

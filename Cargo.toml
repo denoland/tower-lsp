@@ -1,6 +1,6 @@
 [package]
 name = "deno_tower_lsp"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Eyal Kalderon <ebkalderon@gmail.com>", "the Deno authors"]
 edition = "2021"
 rust-version = "1.70.0"
