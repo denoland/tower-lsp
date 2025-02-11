@@ -1,15 +1,16 @@
+use deno_tower_lsp::jsonrpc::Result;
+use deno_tower_lsp::lsp_types::*;
+use deno_tower_lsp::{Client, LanguageServer, LspService, Server};
 use serde_json::Value;
 use tokio::net::{TcpListener, TcpStream};
-use tower_lsp::jsonrpc::Result;
-use tower_lsp::lsp_types::*;
-use tower_lsp::{Client, LanguageServer, LspService, Server};
+use tokio_util::sync::CancellationToken;
 
 #[derive(Debug)]
 struct Backend {
     client: Client,
 }
 
-#[tower_lsp::async_trait(?Send)]
+#[deno_tower_lsp::async_trait(?Send)]
 impl LanguageServer for Backend {
     async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
         Ok(InitializeResult {
@@ -70,7 +71,11 @@ impl LanguageServer for Backend {
             .await;
     }
 
-    async fn execute_command(&self, _: ExecuteCommandParams) -> Result<Option<Value>> {
+    async fn execute_command(
+        &self,
+        _: ExecuteCommandParams,
+        _token: CancellationToken,
+    ) -> Result<Option<Value>> {
         self.client
             .log_message(MessageType::INFO, "command executed!")
             .await;
@@ -108,7 +113,11 @@ impl LanguageServer for Backend {
             .await;
     }
 
-    async fn completion(&self, _: CompletionParams) -> Result<Option<CompletionResponse>> {
+    async fn completion(
+        &self,
+        _: CompletionParams,
+        _token: CancellationToken,
+    ) -> Result<Option<CompletionResponse>> {
         Ok(Some(CompletionResponse::Array(vec![
             CompletionItem::new_simple("Hello".to_string(), "Some detail".to_string()),
             CompletionItem::new_simple("Bye".to_string(), "More detail".to_string()),
@@ -118,9 +127,6 @@ impl LanguageServer for Backend {
 
 #[tokio::main]
 async fn main() {
-    #[cfg(feature = "runtime-agnostic")]
-    use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
-
     tracing_subscriber::fmt().init();
 
     let mut args = std::env::args();
@@ -147,8 +153,6 @@ async fn main() {
     };
 
     let (read, write) = tokio::io::split(stream);
-    #[cfg(feature = "runtime-agnostic")]
-    let (read, write) = (read.compat(), write.compat_write());
 
     let (service, socket) = LspService::new(|client| Backend { client });
     Server::new(read, write, socket).serve(service).await;

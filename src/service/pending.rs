@@ -5,14 +5,15 @@ use std::future::Future;
 use std::sync::Arc;
 
 use dashmap::{mapref::entry::Entry, DashMap};
-use futures::future::{self, Either};
+use futures::future::Either;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
 use super::ExitedError;
 use crate::jsonrpc::{Error, Id, Response};
 
 /// A hashmap containing pending server requests, keyed by request ID.
-pub struct Pending(Arc<DashMap<Id, future::AbortHandle>>);
+pub struct Pending(Arc<DashMap<Id, CancellationToken>>);
 
 impl Pending {
     /// Creates a new pending server requests map.
@@ -27,24 +28,30 @@ impl Pending {
     pub fn execute<F>(
         &self,
         id: Id,
+        token: CancellationToken,
         fut: F,
     ) -> impl Future<Output = Result<Option<Response>, ExitedError>> + 'static
     where
         F: Future<Output = Result<Option<Response>, ExitedError>> + 'static,
     {
         if let Entry::Vacant(entry) = self.0.entry(id.clone()) {
-            let (handler_fut, abort_handle) = future::abortable(fut);
-            entry.insert(abort_handle);
+            entry.insert(token.clone());
 
             let requests = self.0.clone();
             Either::Left(async move {
-                let abort_result = handler_fut.await;
+                let maybe_result = tokio::select! {
+                    biased;
+                    _ = token.cancelled() => None,
+                    result = fut => Some(result),
+                };
                 requests.remove(&id); // Remove abort handle now to avoid double cancellation.
 
-                if let Ok(handler_result) = abort_result {
-                    handler_result
-                } else {
-                    Ok(Some(Response::from_error(id, Error::request_cancelled())))
+                match maybe_result {
+                    Some(result) => result,
+                    None => Ok(Some(Response::from_error(
+                        id.clone(),
+                        Error::request_cancelled(),
+                    ))),
                 }
             })
         } else {
@@ -57,8 +64,8 @@ impl Pending {
     /// This will force the future to resolve to a "canceled" error response. If the future has
     /// already completed, this method call will do nothing.
     pub fn cancel(&self, id: &Id) {
-        if let Some((_, handle)) = self.0.remove(id) {
-            handle.abort();
+        if let Some((_, token)) = self.0.remove(id) {
+            token.cancel();
             info!("successfully cancelled request with ID: {}", id);
         } else {
             debug!(
@@ -70,8 +77,8 @@ impl Pending {
 
     /// Cancels all pending request handlers, if any.
     pub fn cancel_all(&self) {
-        self.0.retain(|_, handle| {
-            handle.abort();
+        self.0.retain(|_, token| {
+            token.cancel();
             false
         });
     }
@@ -87,6 +94,7 @@ impl Debug for Pending {
 
 #[cfg(test)]
 mod tests {
+    use futures::future;
     use serde_json::json;
 
     use super::*;
@@ -98,7 +106,7 @@ mod tests {
         let id = Id::Number(1);
         let id2 = id.clone();
         let response = pending
-            .execute(id.clone(), async {
+            .execute(id.clone(), CancellationToken::new(), async {
                 Ok(Some(Response::from_ok(id2, json!({}))))
             })
             .await;
@@ -111,7 +119,9 @@ mod tests {
         let pending = Pending::new();
 
         let id = Id::Number(1);
-        let handler_fut = tokio::spawn(pending.execute(id.clone(), future::pending()));
+        let token = CancellationToken::new();
+        let handler_fut =
+            tokio::spawn(pending.execute(id.clone(), token.clone(), future::pending()));
 
         pending.cancel(&id);
 
@@ -120,5 +130,6 @@ mod tests {
             res,
             Ok(Some(Response::from_error(id, Error::request_cancelled())))
         );
+        assert!(token.is_cancelled());
     }
 }

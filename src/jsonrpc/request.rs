@@ -4,6 +4,7 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
+use tokio_util::sync::CancellationToken;
 
 use super::{Id, Version};
 
@@ -13,6 +14,15 @@ where
     D: Deserializer<'de>,
 {
     T::deserialize(deserializer).map(Some)
+}
+
+/// Request with a cancellation token.
+#[derive(Clone, Debug)]
+pub struct RequestWithCancellation {
+    /// Request.
+    pub request: Request,
+    /// Cancellation token.
+    pub token: CancellationToken,
 }
 
 /// A JSON-RPC request or notification.
@@ -111,7 +121,7 @@ impl Display for Request {
             inner: &'a mut Formatter<'b>,
         }
 
-        impl<'a, 'b> io::Write for WriterFormatter<'a, 'b> {
+        impl io::Write for WriterFormatter<'_, '_> {
             fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
                 fn io_error<E>(_: E) -> io::Error {
                     // Error value does not matter because fmt::Display impl below just
@@ -169,12 +179,15 @@ impl RequestBuilder {
     }
 
     /// Constructs the JSON-RPC request and returns it.
-    pub fn finish(self) -> Request {
-        Request {
-            jsonrpc: Version,
-            method: self.method,
-            params: self.params,
-            id: self.id,
+    pub fn finish(self) -> RequestWithCancellation {
+        RequestWithCancellation {
+            request: Request {
+                jsonrpc: Version,
+                method: self.method,
+                params: self.params,
+                id: self.id,
+            },
+            token: CancellationToken::new(),
         }
     }
 }

@@ -36,6 +36,7 @@ struct MethodCall<'a> {
     rpc_name: String,
     handler_name: &'a syn::Ident,
     params: Option<&'a syn::Type>,
+    token_param: bool,
     result: Option<&'a syn::Type>,
 }
 
@@ -80,6 +81,7 @@ fn parse_method_calls(lang_server_trait: &ItemTrait) -> Vec<MethodCall> {
             rpc_name,
             handler_name: &method.sig.ident,
             params,
+            token_param: method.sig.inputs.len() == 3,
             result,
         });
     }
@@ -112,26 +114,37 @@ fn gen_server_router(trait_name: &syn::Ident, methods: &[MethodCall]) -> proc_ma
             //
             // https://github.com/dtolnay/async-trait/issues/167
             match (method.params, method.result) {
-                (Some(params), Some(result)) => quote! {
-                    async fn #handler<S: #trait_name>(server: &S, params: #params) -> #result {
-                        server.#handler(params).await
+                (Some(params), Some(result)) => {
+                    if method.token_param {
+                        quote! {
+                            async fn #handler<S: #trait_name>(server: &S, params: #params, token: tokio_util::sync::CancellationToken) -> #result {
+                                server.#handler(params, token).await
+                            }
+                            router.method(#rpc_name, #handler, #layer);
+                        }
+                    } else {
+                        quote! {
+                            async fn #handler<S: #trait_name>(server: &S, params: #params, _: tokio_util::sync::CancellationToken) -> #result {
+                                server.#handler(params).await
+                            }
+                            router.method(#rpc_name, #handler, #layer);
+                        }
                     }
-                    router.method(#rpc_name, #handler, #layer);
                 },
                 (None, Some(result)) => quote! {
-                    async fn #handler<S: #trait_name>(server: &S) -> #result {
+                    async fn #handler<S: #trait_name>(server: &S, _: tokio_util::sync::CancellationToken) -> #result {
                         server.#handler().await
                     }
                     router.method(#rpc_name, #handler, #layer);
                 },
                 (Some(params), None) => quote! {
-                    async fn #handler<S: #trait_name>(server: &S, params: #params) {
+                    async fn #handler<S: #trait_name>(server: &S, params: #params, _: tokio_util::sync::CancellationToken) {
                         server.#handler(params).await
                     }
                     router.method(#rpc_name, #handler, #layer);
                 },
                 (None, None) => quote! {
-                    async fn #handler<S: #trait_name>(server: &S) {
+                    async fn #handler<S: #trait_name>(server: &S, _: tokio_util::sync::CancellationToken) {
                         server.#handler().await
                     }
                     router.method(#rpc_name, #handler, #layer);
@@ -173,12 +186,12 @@ fn gen_server_router(trait_name: &syn::Ident, methods: &[MethodCall]) -> proc_ma
                 let p = pending.clone();
                 router.method(
                     "$/cancelRequest",
-                    move |_: &S, params| cancel_request(params, &p),
+                    move |_: &S, params, _token| cancel_request(params, &p),
                     tower::layer::util::Identity::new(),
                 );
                 router.method(
                     "exit",
-                    |_: &S| std::future::ready(()),
+                    |_: &S, _token| std::future::ready(()),
                     layers::Exit::new(state.clone(), pending, client.clone()),
                 );
 

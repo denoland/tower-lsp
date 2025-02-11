@@ -14,7 +14,7 @@ use serde_json::Value;
 use tower::Service;
 
 use crate::jsonrpc::{
-    Error, ErrorCode, FromParams, IntoResponse, Method, Request, Response, Router,
+    Error, ErrorCode, FromParams, IntoResponse, Method, RequestWithCancellation, Response, Router,
 };
 use crate::LanguageServer;
 
@@ -100,7 +100,7 @@ impl<S: LanguageServer> LspService<S> {
     }
 }
 
-impl<S: LanguageServer> Service<Request> for LspService<S> {
+impl<S: LanguageServer> Service<RequestWithCancellation> for LspService<S> {
     type Response = Option<Response>;
     type Error = ExitedError;
     type Future = LocalBoxFuture<'static, Result<Self::Response, Self::Error>>;
@@ -113,7 +113,7 @@ impl<S: LanguageServer> Service<Request> for LspService<S> {
         }
     }
 
-    fn call(&mut self, req: Request) -> Self::Future {
+    fn call(&mut self, req: RequestWithCancellation) -> Self::Future {
         if self.state.get() == State::Exited {
             return future::err(ExitedError(())).boxed();
         }
@@ -169,14 +169,14 @@ impl<S: LanguageServer> LspServiceBuilder<S> {
     ///
     /// ```rust
     /// use serde_json::{json, Value};
-    /// use tower_lsp::jsonrpc::Result;
-    /// use tower_lsp::lsp_types::*;
-    /// use tower_lsp::{LanguageServer, LspService};
+    /// use deno_tower_lsp::jsonrpc::Result;
+    /// use deno_tower_lsp::lsp_types::*;
+    /// use deno_tower_lsp::{CancellationToken, LanguageServer, LspService};
     ///
     /// struct Mock;
     ///
     /// // Implementation of `LanguageServer` omitted...
-    /// # #[tower_lsp::async_trait(?Send)]
+    /// # #[deno_tower_lsp::async_trait(?Send)]
     /// # impl LanguageServer for Mock {
     /// #     async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
     /// #         Ok(InitializeResult::default())
@@ -188,19 +188,19 @@ impl<S: LanguageServer> LspServiceBuilder<S> {
     /// # }
     ///
     /// impl Mock {
-    ///     async fn request(&self) -> Result<i32> {
+    ///     async fn request(&self, _token: CancellationToken) -> Result<i32> {
     ///         Ok(123)
     ///     }
     ///
-    ///     async fn request_params(&self, params: Vec<String>) -> Result<Value> {
+    ///     async fn request_params(&self, params: Vec<String>, _token: CancellationToken) -> Result<Value> {
     ///         Ok(json!({"num_elems":params.len()}))
     ///     }
     ///
-    ///     async fn notification(&self) {
+    ///     async fn notification(&self, _token: CancellationToken) {
     ///         // ...
     ///     }
     ///
-    ///     async fn notification_params(&self, params: Value) {
+    ///     async fn notification_params(&self, params: Value, _token: CancellationToken) {
     ///         // ...
     /// #       let _ = params;
     ///     }
@@ -251,9 +251,11 @@ mod tests {
     use async_trait::async_trait;
     use lsp_types::*;
     use serde_json::json;
+    use tokio_util::sync::CancellationToken;
     use tower::ServiceExt;
 
     use super::*;
+    use crate::jsonrpc::Request;
     use crate::jsonrpc::Result;
 
     #[derive(Debug)]
@@ -270,18 +272,22 @@ mod tests {
         }
 
         // This handler should never resolve...
-        async fn code_action_resolve(&self, _: CodeAction) -> Result<CodeAction> {
+        async fn code_action_resolve(
+            &self,
+            _: CodeAction,
+            _: CancellationToken,
+        ) -> Result<CodeAction> {
             future::pending().await
         }
     }
 
     impl Mock {
-        async fn custom_request(&self, params: i32) -> Result<i32> {
+        async fn custom_request(&self, params: i32, _: CancellationToken) -> Result<i32> {
             Ok(params)
         }
     }
 
-    fn initialize_request(id: i64) -> Request {
+    fn initialize_request(id: i64) -> RequestWithCancellation {
         Request::build("initialize")
             .params(json!({"capabilities":{}}))
             .id(id)

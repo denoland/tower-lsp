@@ -1,9 +1,10 @@
+use deno_tower_lsp::jsonrpc::{Error, Result};
+use deno_tower_lsp::lsp_types::notification::Notification;
+use deno_tower_lsp::lsp_types::*;
+use deno_tower_lsp::{Client, LanguageServer, LspService, Server};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tower_lsp::jsonrpc::{Error, Result};
-use tower_lsp::lsp_types::notification::Notification;
-use tower_lsp::lsp_types::*;
-use tower_lsp::{Client, LanguageServer, LspService, Server};
+use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Deserialize, Serialize)]
 struct CustomNotificationParams {
@@ -33,7 +34,7 @@ struct Backend {
     client: Client,
 }
 
-#[tower_lsp::async_trait(?Send)]
+#[deno_tower_lsp::async_trait(?Send)]
 impl LanguageServer for Backend {
     async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
         Ok(InitializeResult {
@@ -53,7 +54,11 @@ impl LanguageServer for Backend {
         Ok(())
     }
 
-    async fn execute_command(&self, params: ExecuteCommandParams) -> Result<Option<Value>> {
+    async fn execute_command(
+        &self,
+        params: ExecuteCommandParams,
+        _token: CancellationToken,
+    ) -> Result<Option<Value>> {
         if params.command == "custom.notification" {
             self.client
                 .send_notification::<CustomNotification>(CustomNotificationParams::new(
@@ -75,14 +80,9 @@ impl LanguageServer for Backend {
 
 #[tokio::main]
 async fn main() {
-    #[cfg(feature = "runtime-agnostic")]
-    use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
-
     tracing_subscriber::fmt().init();
 
     let (stdin, stdout) = (tokio::io::stdin(), tokio::io::stdout());
-    #[cfg(feature = "runtime-agnostic")]
-    let (stdin, stdout) = (stdin.compat(), stdout.compat_write());
 
     let (service, socket) = LspService::new(|client| Backend { client });
     Server::new(stdin, stdout, socket).serve(service).await;

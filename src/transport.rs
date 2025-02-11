@@ -1,22 +1,16 @@
 //! Generic server for multiplexing bidirectional streams through a transport.
 
-#[cfg(feature = "runtime-agnostic")]
-use async_codec_lite::{FramedRead, FramedWrite};
-#[cfg(feature = "runtime-agnostic")]
-use futures::io::{AsyncRead, AsyncWrite};
-
-#[cfg(feature = "runtime-tokio")]
 use tokio::io::{AsyncRead, AsyncWrite};
-#[cfg(feature = "runtime-tokio")]
 use tokio_util::codec::{FramedRead, FramedWrite};
 
 use futures::channel::mpsc;
 use futures::{future, join, stream, FutureExt, Sink, SinkExt, Stream, StreamExt, TryFutureExt};
+use tokio_util::sync::CancellationToken;
 use tower::Service;
 use tracing::error;
 
 use crate::codec::{LanguageServerCodec, ParseError};
-use crate::jsonrpc::{Error, Id, Message, Request, Response};
+use crate::jsonrpc::{Error, Id, Message, Request, RequestWithCancellation, Response};
 use crate::service::{ClientSocket, RequestStream, ResponseSink};
 
 const DEFAULT_MAX_CONCURRENCY: usize = 4;
@@ -49,7 +43,7 @@ impl Loopback for ClientSocket {
 
 /// Server for processing requests and responses on standard I/O or TCP.
 #[derive(Debug)]
-pub struct Server<I, O, L = ClientSocket> {
+pub struct Server<I: Send, O, L = ClientSocket> {
     stdin: I,
     stdout: O,
     loopback: L,
@@ -58,8 +52,8 @@ pub struct Server<I, O, L = ClientSocket> {
 
 impl<I, O, L> Server<I, O, L>
 where
-    I: AsyncRead + Unpin,
-    O: AsyncWrite,
+    I: Send + AsyncRead + Unpin,
+    O: Send + AsyncWrite,
     L: Loopback,
     <L::ResponseSink as Sink<Response>>::Error: std::error::Error,
 {
@@ -101,31 +95,48 @@ where
     /// Spawns the service with messages read through `stdin` and responses written to `stdout`.
     pub async fn serve<T>(self, mut service: T)
     where
-        T: Service<Request, Response = Option<Response>> + 'static,
-        T::Error: Into<Box<dyn std::error::Error + Send + Sync>>
+        T: Service<RequestWithCancellation, Response = Option<Response>> + 'static,
+        T::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
     {
+        let current_handle = tokio::runtime::Handle::current();
         let (client_requests, mut client_responses) = self.loopback.split();
         let (client_requests, client_abort) = stream::abortable(client_requests);
-        let (mut responses_tx, responses_rx) = mpsc::channel(0);
         let (mut server_tasks_tx, server_tasks_rx) = mpsc::channel(MESSAGE_QUEUE_SIZE);
-
-        let mut framed_stdin = FramedRead::new(self.stdin, LanguageServerCodec::default());
-        let framed_stdout = FramedWrite::new(self.stdout, LanguageServerCodec::default());
-
+        let (mut responses_tx, responses_rx) = mpsc::channel(0);
+        let (msg_tx, mut msg_rx) =
+            tokio::sync::mpsc::unbounded_channel::<Result<Message, ParseError>>();
         let process_server_tasks = server_tasks_rx
             .buffer_unordered(self.max_concurrency)
             .filter_map(future::ready)
             .map(|res| Ok(Message::Response(res)))
             .forward(responses_tx.clone().sink_map_err(|_| unreachable!()))
             .map(|_| ());
+        let framed_stdout = FramedWrite::new(self.stdout, LanguageServerCodec::default());
+        let future = tokio::task::spawn_blocking(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_io()
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                let mut framed_stdin = FramedRead::new(self.stdin, LanguageServerCodec::default());
+
+                while let Some(msg) = framed_stdin.next().await {
+                    // todo: pass pending in here and observe and cancel the message
+
+                    if msg_tx.send(msg).is_err() {
+                        break;
+                    }
+                }
+            });
+        });
 
         let print_output = stream::select(responses_rx, client_requests.map(Message::Request))
             .map(Ok)
             .forward(framed_stdout.sink_map_err(|e| error!("failed to encode message: {}", e)))
             .map(|_| ());
 
-        let read_input = async {
-            while let Some(msg) = framed_stdin.next().await {
+        let message_fut = async {
+            while let Some(msg) = msg_rx.recv().await {
                 match msg {
                     Ok(Message::Request(req)) => {
                         if let Err(err) = future::poll_fn(|cx| service.poll_ready(cx)).await {
@@ -133,10 +144,15 @@ where
                             return;
                         }
 
-                        let fut = service.call(req).unwrap_or_else(|err| {
-                            error!("{}", display_sources(err.into().as_ref()));
-                            None
-                        });
+                        let fut = service
+                            .call(RequestWithCancellation {
+                                request: req,
+                                token: CancellationToken::new(),
+                            })
+                            .unwrap_or_else(|err| {
+                                error!("{}", display_sources(err.into().as_ref()));
+                                None
+                            });
 
                         server_tasks_tx.send(fut).await.unwrap();
                     }
@@ -153,13 +169,13 @@ where
                     }
                 }
             }
-
-            server_tasks_tx.disconnect();
-            responses_tx.disconnect();
-            client_abort.abort();
         };
 
-        join!(print_output, read_input, process_server_tasks);
+        join!(future, print_output, process_server_tasks, message_fut);
+
+        server_tasks_tx.disconnect();
+        responses_tx.disconnect();
+        client_abort.abort();
     }
 }
 
@@ -171,18 +187,9 @@ fn display_sources(error: &dyn std::error::Error) -> String {
     }
 }
 
-#[cfg(feature = "runtime-tokio")]
 fn to_jsonrpc_error(err: ParseError) -> Error {
     match err {
         ParseError::Body(err) if err.is_data() => Error::invalid_request(),
-        _ => Error::parse_error(),
-    }
-}
-
-#[cfg(feature = "runtime-agnostic")]
-fn to_jsonrpc_error(err: impl std::error::Error) -> Error {
-    match err.source().and_then(|e| e.downcast_ref()) {
-        Some(ParseError::Body(err)) if err.is_data() => Error::invalid_request(),
         _ => Error::parse_error(),
     }
 }
@@ -191,9 +198,6 @@ fn to_jsonrpc_error(err: impl std::error::Error) -> Error {
 mod tests {
     use std::task::{Context, Poll};
 
-    #[cfg(feature = "runtime-agnostic")]
-    use futures::io::Cursor;
-    #[cfg(feature = "runtime-tokio")]
     use std::io::Cursor;
 
     use futures::future::Ready;
@@ -207,7 +211,7 @@ mod tests {
     #[derive(Debug)]
     struct MockService;
 
-    impl Service<Request> for MockService {
+    impl Service<RequestWithCancellation> for MockService {
         type Response = Option<Response>;
         type Error = String;
         type Future = Ready<Result<Self::Response, Self::Error>>;
@@ -216,7 +220,7 @@ mod tests {
             Poll::Ready(Ok(()))
         }
 
-        fn call(&mut self, _: Request) -> Self::Future {
+        fn call(&mut self, _: RequestWithCancellation) -> Self::Future {
             let response = serde_json::from_str(RESPONSE).unwrap();
             future::ok(Some(response))
         }
