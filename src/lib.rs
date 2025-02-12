@@ -5,16 +5,17 @@
 //! # Example
 //!
 //! ```rust
-//! use tower_lsp::jsonrpc::Result;
-//! use tower_lsp::lsp_types::*;
-//! use tower_lsp::{Client, LanguageServer, LspService, Server};
+//! use deno_tower_lsp::jsonrpc::Result;
+//! use deno_tower_lsp::lsp_types::*;
+//! use deno_tower_lsp::{Client, LanguageServer, LspService, Server};
+//! use deno_tower_lsp::CancellationToken;
 //!
 //! #[derive(Debug)]
 //! struct Backend {
 //!     client: Client,
 //! }
 //!
-//! #[tower_lsp::async_trait(?Send)]
+//! #[deno_tower_lsp::async_trait(?Send)]
 //! impl LanguageServer for Backend {
 //!     async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
 //!         Ok(InitializeResult {
@@ -37,14 +38,14 @@
 //!         Ok(())
 //!     }
 //!
-//!     async fn completion(&self, _: CompletionParams) -> Result<Option<CompletionResponse>> {
+//!     async fn completion(&self, _: CompletionParams, _token: CancellationToken) -> Result<Option<CompletionResponse>> {
 //!         Ok(Some(CompletionResponse::Array(vec![
 //!             CompletionItem::new_simple("Hello".to_string(), "Some detail".to_string()),
 //!             CompletionItem::new_simple("Bye".to_string(), "More detail".to_string())
 //!         ])))
 //!     }
 //!
-//!     async fn hover(&self, _: HoverParams) -> Result<Option<Hover>> {
+//!     async fn hover(&self, _: HoverParams, _token: CancellationToken) -> Result<Option<Hover>> {
 //!         Ok(Some(Hover {
 //!             contents: HoverContents::Scalar(
 //!                 MarkedString::String("You're hovering!".to_string())
@@ -58,18 +59,14 @@
 //! async fn main() {
 //! #   tracing_subscriber::fmt().init();
 //! #
-//! #   #[cfg(feature = "runtime-agnostic")]
-//! #   use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 //! #   use std::io::Cursor;
 //!     let stdin = tokio::io::stdin();
 //!     let stdout = tokio::io::stdout();
 //! #   let message = r#"{"jsonrpc":"2.0","method":"exit"}"#;
 //! #   let (stdin, stdout) = (Cursor::new(format!("Content-Length: {}\r\n\r\n{}", message.len(), message).into_bytes()), Cursor::new(Vec::new()));
-//! #   #[cfg(feature = "runtime-agnostic")]
-//! #   let (stdin, stdout) = (stdin.compat(), stdout.compat_write());
 //!
-//!     let (service, socket) = LspService::new(|client| Backend { client });
-//!     Server::new(stdin, stdout, socket).serve(service).await;
+//!     let (service, socket, pending) = LspService::new(|client| Backend { client });
+//!     Server::new(stdin, stdout, socket, pending).serve(service).await;
 //! }
 //! ```
 
@@ -81,21 +78,23 @@ pub extern crate lsp_types;
 
 /// A re-export of [`async-trait`](https://docs.rs/async-trait) for convenience.
 pub use async_trait::async_trait;
+pub use tokio_util::sync::CancellationToken;
 
 pub use self::service::progress::{
     Bounded, Cancellable, NotCancellable, OngoingProgress, Progress, Unbounded,
 };
+pub use self::service::Pending;
 pub use self::service::{Client, ClientSocket, ExitedError, LspService, LspServiceBuilder};
 pub use self::transport::{Loopback, Server};
 
 use auto_impl::auto_impl;
+use deno_tower_lsp_macros::rpc;
 use lsp_types::request::{
     GotoDeclarationParams, GotoDeclarationResponse, GotoImplementationParams,
     GotoImplementationResponse, GotoTypeDefinitionParams, GotoTypeDefinitionResponse,
 };
 use lsp_types::*;
 use serde_json::Value;
-use tower_lsp_macros::rpc;
 use tracing::{error, warn};
 
 use self::jsonrpc::{Error, Result};
@@ -204,8 +203,10 @@ pub trait LanguageServer: 'static {
     async fn will_save_wait_until(
         &self,
         params: WillSaveTextDocumentParams,
+        token: CancellationToken,
     ) -> Result<Option<Vec<TextEdit>>> {
         let _ = params;
+        let _ = token;
         error!("Got a textDocument/willSaveWaitUntil request, but it is not implemented");
         Err(Error::method_not_found())
     }
@@ -304,8 +305,10 @@ pub trait LanguageServer: 'static {
     async fn goto_declaration(
         &self,
         params: GotoDeclarationParams,
+        token: CancellationToken,
     ) -> Result<Option<GotoDeclarationResponse>> {
         let _ = params;
+        let _ = token;
         error!("Got a textDocument/declaration request, but it is not implemented");
         Err(Error::method_not_found())
     }
@@ -329,8 +332,10 @@ pub trait LanguageServer: 'static {
     async fn goto_definition(
         &self,
         params: GotoDefinitionParams,
+        token: CancellationToken,
     ) -> Result<Option<GotoDefinitionResponse>> {
         let _ = params;
+        let _ = token;
         error!("Got a textDocument/definition request, but it is not implemented");
         Err(Error::method_not_found())
     }
@@ -356,8 +361,10 @@ pub trait LanguageServer: 'static {
     async fn goto_type_definition(
         &self,
         params: GotoTypeDefinitionParams,
+        token: CancellationToken,
     ) -> Result<Option<GotoTypeDefinitionResponse>> {
         let _ = params;
+        let _ = token;
         error!("Got a textDocument/typeDefinition request, but it is not implemented");
         Err(Error::method_not_found())
     }
@@ -383,8 +390,10 @@ pub trait LanguageServer: 'static {
     async fn goto_implementation(
         &self,
         params: GotoImplementationParams,
+        token: CancellationToken,
     ) -> Result<Option<GotoImplementationResponse>> {
         let _ = params;
+        let _ = token;
         error!("Got a textDocument/implementation request, but it is not implemented");
         Err(Error::method_not_found())
     }
@@ -394,8 +403,13 @@ pub trait LanguageServer: 'static {
     ///
     /// [`textDocument/references`]: https://microsoft.github.io/language-server-protocol/specification#textDocument_references
     #[rpc(name = "textDocument/references")]
-    async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
+    async fn references(
+        &self,
+        params: ReferenceParams,
+        token: CancellationToken,
+    ) -> Result<Option<Vec<Location>>> {
         let _ = params;
+        let _ = token;
         error!("Got a textDocument/references request, but it is not implemented");
         Err(Error::method_not_found())
     }
@@ -422,8 +436,10 @@ pub trait LanguageServer: 'static {
     async fn prepare_call_hierarchy(
         &self,
         params: CallHierarchyPrepareParams,
+        token: CancellationToken,
     ) -> Result<Option<Vec<CallHierarchyItem>>> {
         let _ = params;
+        let _ = token;
         error!("Got a textDocument/prepareCallHierarchy request, but it is not implemented");
         Err(Error::method_not_found())
     }
@@ -444,8 +460,10 @@ pub trait LanguageServer: 'static {
     async fn incoming_calls(
         &self,
         params: CallHierarchyIncomingCallsParams,
+        token: CancellationToken,
     ) -> Result<Option<Vec<CallHierarchyIncomingCall>>> {
         let _ = params;
+        let _ = token;
         error!("Got a callHierarchy/incomingCalls request, but it is not implemented");
         Err(Error::method_not_found())
     }
@@ -466,8 +484,10 @@ pub trait LanguageServer: 'static {
     async fn outgoing_calls(
         &self,
         params: CallHierarchyOutgoingCallsParams,
+        token: CancellationToken,
     ) -> Result<Option<Vec<CallHierarchyOutgoingCall>>> {
         let _ = params;
+        let _ = token;
         error!("Got a callHierarchy/outgoingCalls request, but it is not implemented");
         Err(Error::method_not_found())
     }
@@ -492,8 +512,10 @@ pub trait LanguageServer: 'static {
     async fn prepare_type_hierarchy(
         &self,
         params: TypeHierarchyPrepareParams,
+        token: CancellationToken,
     ) -> Result<Option<Vec<TypeHierarchyItem>>> {
         let _ = params;
+        let _ = token;
         error!("Got a textDocument/prepareTypeHierarchy request, but it is not implemented");
         Err(Error::method_not_found())
     }
@@ -513,8 +535,10 @@ pub trait LanguageServer: 'static {
     async fn supertypes(
         &self,
         params: TypeHierarchySupertypesParams,
+        token: CancellationToken,
     ) -> Result<Option<Vec<TypeHierarchyItem>>> {
         let _ = params;
+        let _ = token;
         error!("Got a typeHierarchy/supertypes request, but it is not implemented");
         Err(Error::method_not_found())
     }
@@ -534,8 +558,10 @@ pub trait LanguageServer: 'static {
     async fn subtypes(
         &self,
         params: TypeHierarchySubtypesParams,
+        token: CancellationToken,
     ) -> Result<Option<Vec<TypeHierarchyItem>>> {
         let _ = params;
+        let _ = token;
         error!("Got a typeHierarchy/subtypes request, but it is not implemented");
         Err(Error::method_not_found())
     }
@@ -554,8 +580,10 @@ pub trait LanguageServer: 'static {
     async fn document_highlight(
         &self,
         params: DocumentHighlightParams,
+        token: CancellationToken,
     ) -> Result<Option<Vec<DocumentHighlight>>> {
         let _ = params;
+        let _ = token;
         error!("Got a textDocument/documentHighlight request, but it is not implemented");
         Err(Error::method_not_found())
     }
@@ -578,8 +606,13 @@ pub trait LanguageServer: 'static {
     /// InitializeParams::capabilities::text_document::document_link::tooltip_support
     /// ```
     #[rpc(name = "textDocument/documentLink")]
-    async fn document_link(&self, params: DocumentLinkParams) -> Result<Option<Vec<DocumentLink>>> {
+    async fn document_link(
+        &self,
+        params: DocumentLinkParams,
+        token: CancellationToken,
+    ) -> Result<Option<Vec<DocumentLink>>> {
         let _ = params;
+        let _ = token;
         error!("Got a textDocument/documentLink request, but it is not implemented");
         Err(Error::method_not_found())
     }
@@ -592,8 +625,13 @@ pub trait LanguageServer: 'static {
     /// A document link is a range in a text document that links to an internal or external
     /// resource, like another text document or a web site.
     #[rpc(name = "documentLink/resolve")]
-    async fn document_link_resolve(&self, params: DocumentLink) -> Result<DocumentLink> {
+    async fn document_link_resolve(
+        &self,
+        params: DocumentLink,
+        token: CancellationToken,
+    ) -> Result<DocumentLink> {
         let _ = params;
+        let _ = token;
         error!("Got a documentLink/resolve request, but it is not implemented");
         Err(Error::method_not_found())
     }
@@ -606,8 +644,9 @@ pub trait LanguageServer: 'static {
     /// Such hover information typically includes type signature information and inline
     /// documentation for the symbol at the given text document position.
     #[rpc(name = "textDocument/hover")]
-    async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
+    async fn hover(&self, params: HoverParams, token: CancellationToken) -> Result<Option<Hover>> {
         let _ = params;
+        let _ = token;
         error!("Got a textDocument/hover request, but it is not implemented");
         Err(Error::method_not_found())
     }
@@ -617,8 +656,13 @@ pub trait LanguageServer: 'static {
     ///
     /// [`textDocument/codeLens`]: https://microsoft.github.io/language-server-protocol/specification#textDocument_codeLens
     #[rpc(name = "textDocument/codeLens")]
-    async fn code_lens(&self, params: CodeLensParams) -> Result<Option<Vec<CodeLens>>> {
+    async fn code_lens(
+        &self,
+        params: CodeLensParams,
+        token: CancellationToken,
+    ) -> Result<Option<Vec<CodeLens>>> {
         let _ = params;
+        let _ = token;
         error!("Got a textDocument/codeLens request, but it is not implemented");
         Err(Error::method_not_found())
     }
@@ -628,8 +672,13 @@ pub trait LanguageServer: 'static {
     ///
     /// [`codeLens/resolve`]: https://microsoft.github.io/language-server-protocol/specification#codeLens_resolve
     #[rpc(name = "codeLens/resolve")]
-    async fn code_lens_resolve(&self, params: CodeLens) -> Result<CodeLens> {
+    async fn code_lens_resolve(
+        &self,
+        params: CodeLens,
+        token: CancellationToken,
+    ) -> Result<CodeLens> {
         let _ = params;
+        let _ = token;
         error!("Got a codeLens/resolve request, but it is not implemented");
         Err(Error::method_not_found())
     }
@@ -643,8 +692,13 @@ pub trait LanguageServer: 'static {
     ///
     /// This request was introduced in specification version 3.10.0.
     #[rpc(name = "textDocument/foldingRange")]
-    async fn folding_range(&self, params: FoldingRangeParams) -> Result<Option<Vec<FoldingRange>>> {
+    async fn folding_range(
+        &self,
+        params: FoldingRangeParams,
+        token: CancellationToken,
+    ) -> Result<Option<Vec<FoldingRange>>> {
         let _ = params;
+        let _ = token;
         error!("Got a textDocument/foldingRange request, but it is not implemented");
         Err(Error::method_not_found())
     }
@@ -665,8 +719,10 @@ pub trait LanguageServer: 'static {
     async fn selection_range(
         &self,
         params: SelectionRangeParams,
+        token: CancellationToken,
     ) -> Result<Option<Vec<SelectionRange>>> {
         let _ = params;
+        let _ = token;
         error!("Got a textDocument/selectionRange request, but it is not implemented");
         Err(Error::method_not_found())
     }
@@ -687,8 +743,10 @@ pub trait LanguageServer: 'static {
     async fn document_symbol(
         &self,
         params: DocumentSymbolParams,
+        token: CancellationToken,
     ) -> Result<Option<DocumentSymbolResponse>> {
         let _ = params;
+        let _ = token;
         error!("Got a textDocument/documentSymbol request, but it is not implemented");
         Err(Error::method_not_found())
     }
@@ -712,8 +770,10 @@ pub trait LanguageServer: 'static {
     async fn semantic_tokens_full(
         &self,
         params: SemanticTokensParams,
+        token: CancellationToken,
     ) -> Result<Option<SemanticTokensResult>> {
         let _ = params;
+        let _ = token;
         error!("Got a textDocument/semanticTokens/full request, but it is not implemented");
         Err(Error::method_not_found())
     }
@@ -733,8 +793,10 @@ pub trait LanguageServer: 'static {
     async fn semantic_tokens_full_delta(
         &self,
         params: SemanticTokensDeltaParams,
+        token: CancellationToken,
     ) -> Result<Option<SemanticTokensFullDeltaResult>> {
         let _ = params;
+        let _ = token;
         error!("Got a textDocument/semanticTokens/full/delta request, but it is not implemented");
         Err(Error::method_not_found())
     }
@@ -759,8 +821,10 @@ pub trait LanguageServer: 'static {
     async fn semantic_tokens_range(
         &self,
         params: SemanticTokensRangeParams,
+        token: CancellationToken,
     ) -> Result<Option<SemanticTokensRangeResult>> {
         let _ = params;
+        let _ = token;
         error!("Got a textDocument/semanticTokens/range request, but it is not implemented");
         Err(Error::method_not_found())
     }
@@ -775,8 +839,13 @@ pub trait LanguageServer: 'static {
     ///
     /// This request was introduced in specification version 3.17.0.
     #[rpc(name = "textDocument/inlineValue")]
-    async fn inline_value(&self, params: InlineValueParams) -> Result<Option<Vec<InlineValue>>> {
+    async fn inline_value(
+        &self,
+        params: InlineValueParams,
+        token: CancellationToken,
+    ) -> Result<Option<Vec<InlineValue>>> {
         let _ = params;
+        let _ = token;
         error!("Got a textDocument/inlineValue request, but it is not implemented");
         Err(Error::method_not_found())
     }
@@ -791,8 +860,13 @@ pub trait LanguageServer: 'static {
     ///
     /// This request was introduced in specification version 3.17.0
     #[rpc(name = "textDocument/inlayHint")]
-    async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
+    async fn inlay_hint(
+        &self,
+        params: InlayHintParams,
+        token: CancellationToken,
+    ) -> Result<Option<Vec<InlayHint>>> {
         let _ = params;
+        let _ = token;
         error!("Got a textDocument/inlayHint request, but it is not implemented");
         Err(Error::method_not_found())
     }
@@ -820,8 +894,13 @@ pub trait LanguageServer: 'static {
     ///
     /// This request was introduced in specification version 3.17.0
     #[rpc(name = "inlayHint/resolve")]
-    async fn inlay_hint_resolve(&self, params: InlayHint) -> Result<InlayHint> {
+    async fn inlay_hint_resolve(
+        &self,
+        params: InlayHint,
+        token: CancellationToken,
+    ) -> Result<InlayHint> {
         let _ = params;
+        let _ = token;
         error!("Got a inlayHint/resolve request, but it is not implemented");
         Err(Error::method_not_found())
     }
@@ -850,8 +929,13 @@ pub trait LanguageServer: 'static {
     ///
     /// This request was introduced in specification version 3.16.0.
     #[rpc(name = "textDocument/moniker")]
-    async fn moniker(&self, params: MonikerParams) -> Result<Option<Vec<Moniker>>> {
+    async fn moniker(
+        &self,
+        params: MonikerParams,
+        token: CancellationToken,
+    ) -> Result<Option<Vec<Moniker>>> {
         let _ = params;
+        let _ = token;
         error!("Got a textDocument/moniker request, but it is not implemented");
         Err(Error::method_not_found())
     }
@@ -875,8 +959,13 @@ pub trait LanguageServer: 'static {
     /// must be provided in the `textDocument/completion` response and must not be changed during
     /// resolve.
     #[rpc(name = "textDocument/completion")]
-    async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
+    async fn completion(
+        &self,
+        params: CompletionParams,
+        token: CancellationToken,
+    ) -> Result<Option<CompletionResponse>> {
         let _ = params;
+        let _ = token;
         error!("Got a textDocument/completion request, but it is not implemented");
         Err(Error::method_not_found())
     }
@@ -886,8 +975,13 @@ pub trait LanguageServer: 'static {
     ///
     /// [`completionItem/resolve`]: https://microsoft.github.io/language-server-protocol/specification#completionItem_resolve
     #[rpc(name = "completionItem/resolve")]
-    async fn completion_resolve(&self, params: CompletionItem) -> Result<CompletionItem> {
+    async fn completion_resolve(
+        &self,
+        params: CompletionItem,
+        token: CancellationToken,
+    ) -> Result<CompletionItem> {
         let _ = params;
+        let _ = token;
         error!("Got a completionItem/resolve request, but it is not implemented");
         Err(Error::method_not_found())
     }
@@ -910,8 +1004,10 @@ pub trait LanguageServer: 'static {
     async fn diagnostic(
         &self,
         params: DocumentDiagnosticParams,
+        token: CancellationToken,
     ) -> Result<DocumentDiagnosticReportResult> {
         let _ = params;
+        let _ = token;
         error!("Got a textDocument/diagnostic request, but it is not implemented");
         Err(Error::method_not_found())
     }
@@ -948,8 +1044,10 @@ pub trait LanguageServer: 'static {
     async fn workspace_diagnostic(
         &self,
         params: WorkspaceDiagnosticParams,
+        token: CancellationToken,
     ) -> Result<WorkspaceDiagnosticReportResult> {
         let _ = params;
+        let _ = token;
         error!("Got a workspace/diagnostic request, but it is not implemented");
         Err(Error::method_not_found())
     }
@@ -959,8 +1057,13 @@ pub trait LanguageServer: 'static {
     ///
     /// [`textDocument/signatureHelp`]: https://microsoft.github.io/language-server-protocol/specification#textDocument_signatureHelp
     #[rpc(name = "textDocument/signatureHelp")]
-    async fn signature_help(&self, params: SignatureHelpParams) -> Result<Option<SignatureHelp>> {
+    async fn signature_help(
+        &self,
+        params: SignatureHelpParams,
+        token: CancellationToken,
+    ) -> Result<Option<SignatureHelp>> {
         let _ = params;
+        let _ = token;
         error!("Got a textDocument/signatureHelp request, but it is not implemented");
         Err(Error::method_not_found())
     }
@@ -1019,8 +1122,13 @@ pub trait LanguageServer: 'static {
     ///   information. However it allows them to better group code action, for example, into
     ///   corresponding menus (e.g. all refactor code actions into a refactor menu).
     #[rpc(name = "textDocument/codeAction")]
-    async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
+    async fn code_action(
+        &self,
+        params: CodeActionParams,
+        token: CancellationToken,
+    ) -> Result<Option<CodeActionResponse>> {
         let _ = params;
+        let _ = token;
         error!("Got a textDocument/codeAction request, but it is not implemented");
         Err(Error::method_not_found())
     }
@@ -1037,8 +1145,13 @@ pub trait LanguageServer: 'static {
     ///
     /// This request was introduced in specification version 3.16.0.
     #[rpc(name = "codeAction/resolve")]
-    async fn code_action_resolve(&self, params: CodeAction) -> Result<CodeAction> {
+    async fn code_action_resolve(
+        &self,
+        params: CodeAction,
+        token: CancellationToken,
+    ) -> Result<CodeAction> {
         let _ = params;
+        let _ = token;
         error!("Got a codeAction/resolve request, but it is not implemented");
         Err(Error::method_not_found())
     }
@@ -1058,8 +1171,13 @@ pub trait LanguageServer: 'static {
     ///
     /// This request was introduced in specification version 3.6.0.
     #[rpc(name = "textDocument/documentColor")]
-    async fn document_color(&self, params: DocumentColorParams) -> Result<Vec<ColorInformation>> {
+    async fn document_color(
+        &self,
+        params: DocumentColorParams,
+        token: CancellationToken,
+    ) -> Result<Vec<ColorInformation>> {
         let _ = params;
+        let _ = token;
         error!("Got a textDocument/documentColor request, but it is not implemented");
         Err(Error::method_not_found())
     }
@@ -1084,8 +1202,10 @@ pub trait LanguageServer: 'static {
     async fn color_presentation(
         &self,
         params: ColorPresentationParams,
+        token: CancellationToken,
     ) -> Result<Vec<ColorPresentation>> {
         let _ = params;
+        let _ = token;
         error!("Got a textDocument/colorPresentation request, but it is not implemented");
         Err(Error::method_not_found())
     }
@@ -1095,8 +1215,13 @@ pub trait LanguageServer: 'static {
     ///
     /// [`textDocument/formatting`]: https://microsoft.github.io/language-server-protocol/specification#textDocument_formatting
     #[rpc(name = "textDocument/formatting")]
-    async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
+    async fn formatting(
+        &self,
+        params: DocumentFormattingParams,
+        token: CancellationToken,
+    ) -> Result<Option<Vec<TextEdit>>> {
         let _ = params;
+        let _ = token;
         error!("Got a textDocument/formatting request, but it is not implemented");
         Err(Error::method_not_found())
     }
@@ -1109,8 +1234,10 @@ pub trait LanguageServer: 'static {
     async fn range_formatting(
         &self,
         params: DocumentRangeFormattingParams,
+        token: CancellationToken,
     ) -> Result<Option<Vec<TextEdit>>> {
         let _ = params;
+        let _ = token;
         error!("Got a textDocument/rangeFormatting request, but it is not implemented");
         Err(Error::method_not_found())
     }
@@ -1123,8 +1250,10 @@ pub trait LanguageServer: 'static {
     async fn on_type_formatting(
         &self,
         params: DocumentOnTypeFormattingParams,
+        token: CancellationToken,
     ) -> Result<Option<Vec<TextEdit>>> {
         let _ = params;
+        let _ = token;
         error!("Got a textDocument/onTypeFormatting request, but it is not implemented");
         Err(Error::method_not_found())
     }
@@ -1135,8 +1264,13 @@ pub trait LanguageServer: 'static {
     ///
     /// [`textDocument/rename`]: https://microsoft.github.io/language-server-protocol/specification#textDocument_rename
     #[rpc(name = "textDocument/rename")]
-    async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
+    async fn rename(
+        &self,
+        params: RenameParams,
+        token: CancellationToken,
+    ) -> Result<Option<WorkspaceEdit>> {
         let _ = params;
+        let _ = token;
         error!("Got a textDocument/rename request, but it is not implemented");
         Err(Error::method_not_found())
     }
@@ -1153,8 +1287,10 @@ pub trait LanguageServer: 'static {
     async fn prepare_rename(
         &self,
         params: TextDocumentPositionParams,
+        token: CancellationToken,
     ) -> Result<Option<PrepareRenameResponse>> {
         let _ = params;
+        let _ = token;
         error!("Got a textDocument/prepareRename request, but it is not implemented");
         Err(Error::method_not_found())
     }
@@ -1178,8 +1314,10 @@ pub trait LanguageServer: 'static {
     async fn linked_editing_range(
         &self,
         params: LinkedEditingRangeParams,
+        token: CancellationToken,
     ) -> Result<Option<LinkedEditingRanges>> {
         let _ = params;
+        let _ = token;
         error!("Got a textDocument/linkedEditingRange request, but it is not implemented");
         Err(Error::method_not_found())
     }
@@ -1206,8 +1344,10 @@ pub trait LanguageServer: 'static {
     async fn symbol(
         &self,
         params: WorkspaceSymbolParams,
+        token: CancellationToken,
     ) -> Result<Option<Vec<SymbolInformation>>> {
         let _ = params;
+        let _ = token;
         error!("Got a workspace/symbol request, but it is not implemented");
         Err(Error::method_not_found())
     }
@@ -1223,8 +1363,13 @@ pub trait LanguageServer: 'static {
     ///
     /// This request was introduced in specification version 3.17.0.
     #[rpc(name = "workspaceSymbol/resolve")]
-    async fn symbol_resolve(&self, params: WorkspaceSymbol) -> Result<WorkspaceSymbol> {
+    async fn symbol_resolve(
+        &self,
+        params: WorkspaceSymbol,
+        token: CancellationToken,
+    ) -> Result<WorkspaceSymbol> {
         let _ = params;
+        let _ = token;
         error!("Got a workspaceSymbol/resolve request, but it is not implemented");
         Err(Error::method_not_found())
     }
@@ -1272,8 +1417,13 @@ pub trait LanguageServer: 'static {
     ///
     /// This request was introduced in specification version 3.16.0.
     #[rpc(name = "workspace/willCreateFiles")]
-    async fn will_create_files(&self, params: CreateFilesParams) -> Result<Option<WorkspaceEdit>> {
+    async fn will_create_files(
+        &self,
+        params: CreateFilesParams,
+        token: CancellationToken,
+    ) -> Result<Option<WorkspaceEdit>> {
         let _ = params;
+        let _ = token;
         error!("Got a workspace/willCreateFiles request, but it is not implemented");
         Err(Error::method_not_found())
     }
@@ -1302,8 +1452,13 @@ pub trait LanguageServer: 'static {
     ///
     /// This request was introduced in specification version 3.16.0.
     #[rpc(name = "workspace/willRenameFiles")]
-    async fn will_rename_files(&self, params: RenameFilesParams) -> Result<Option<WorkspaceEdit>> {
+    async fn will_rename_files(
+        &self,
+        params: RenameFilesParams,
+        token: CancellationToken,
+    ) -> Result<Option<WorkspaceEdit>> {
         let _ = params;
+        let _ = token;
         error!("Got a workspace/willRenameFiles request, but it is not implemented");
         Err(Error::method_not_found())
     }
@@ -1333,8 +1488,13 @@ pub trait LanguageServer: 'static {
     ///
     /// This request was introduced in specification version 3.16.0.
     #[rpc(name = "workspace/willDeleteFiles")]
-    async fn will_delete_files(&self, params: DeleteFilesParams) -> Result<Option<WorkspaceEdit>> {
+    async fn will_delete_files(
+        &self,
+        params: DeleteFilesParams,
+        token: CancellationToken,
+    ) -> Result<Option<WorkspaceEdit>> {
         let _ = params;
+        let _ = token;
         error!("Got a workspace/willDeleteFiles request, but it is not implemented");
         Err(Error::method_not_found())
     }
@@ -1371,8 +1531,13 @@ pub trait LanguageServer: 'static {
     /// In most cases, the server creates a [`WorkspaceEdit`] structure and applies the changes to
     /// the workspace using `Client::apply_edit()` before returning from this function.
     #[rpc(name = "workspace/executeCommand")]
-    async fn execute_command(&self, params: ExecuteCommandParams) -> Result<Option<Value>> {
+    async fn execute_command(
+        &self,
+        params: ExecuteCommandParams,
+        token: CancellationToken,
+    ) -> Result<Option<Value>> {
         let _ = params;
+        let _ = token;
         error!("Got a workspace/executeCommand request, but it is not implemented");
         Err(Error::method_not_found())
     }

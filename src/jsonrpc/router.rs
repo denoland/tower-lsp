@@ -11,16 +11,17 @@ use std::task::{Context, Poll};
 use futures::future::{self, FutureExt, LocalBoxFuture};
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
+use tokio_util::sync::CancellationToken;
 use tower::{util::UnsyncBoxService, Layer, Service};
 
 use crate::jsonrpc::ErrorCode;
 
-use super::{Error, Id, Request, Response};
+use super::{Error, Id, RequestWithCancellation, Response};
 
 /// A modular JSON-RPC 2.0 request router service.
 pub struct Router<S, E = Infallible> {
     server: Arc<S>,
-    methods: HashMap<&'static str, UnsyncBoxService<Request, Option<Response>, E>>,
+    methods: HashMap<&'static str, UnsyncBoxService<RequestWithCancellation, Option<Response>, E>>,
 }
 
 impl<S: 'static, E> Router<S, E> {
@@ -46,16 +47,21 @@ impl<S: 'static, E> Router<S, E> {
         R: IntoResponse,
         F: for<'a> Method<&'a S, P, R> + Clone + 'static,
         L: Layer<MethodHandler<P, R, E>>,
-        L::Service: Service<Request, Response = Option<Response>, Error = E> + 'static,
-        <L::Service as Service<Request>>::Future: 'static,
+        L::Service:
+            Service<RequestWithCancellation, Response = Option<Response>, Error = E> + 'static,
+        <L::Service as Service<RequestWithCancellation>>::Future: 'static,
     {
         let server = &self.server;
         self.methods.entry(name).or_insert_with(|| {
             let server = server.clone();
-            let handler = MethodHandler::new(move |params| {
+            let handler = MethodHandler::new(move |params_with_token| {
                 let callback = callback.clone();
                 let server = server.clone();
-                async move { callback.invoke(&*server, params).await }
+                async move {
+                    callback
+                        .invoke(&*server, params_with_token.data, params_with_token.token)
+                        .await
+                }
             });
 
             UnsyncBoxService::new(layer.layer(handler))
@@ -74,7 +80,7 @@ impl<S: Debug, E> Debug for Router<S, E> {
     }
 }
 
-impl<S, E: Send + 'static> Service<Request> for Router<S, E> {
+impl<S, E: Send + 'static> Service<RequestWithCancellation> for Router<S, E> {
     type Response = Option<Response>;
     type Error = E;
     type Future = LocalBoxFuture<'static, Result<Self::Response, Self::Error>>;
@@ -83,11 +89,11 @@ impl<S, E: Send + 'static> Service<Request> for Router<S, E> {
         Poll::Ready(Ok(()))
     }
 
-    fn call(&mut self, req: Request) -> Self::Future {
-        if let Some(handler) = self.methods.get_mut(req.method()) {
+    fn call(&mut self, req: RequestWithCancellation) -> Self::Future {
+        if let Some(handler) = self.methods.get_mut(req.request.method()) {
             handler.call(req)
         } else {
-            let (method, id, _) = req.into_parts();
+            let (method, id, _) = req.request.into_parts();
             future::ok(id.map(|id| {
                 let mut error = Error::method_not_found();
                 error.data = Some(Value::from(method));
@@ -98,16 +104,21 @@ impl<S, E: Send + 'static> Service<Request> for Router<S, E> {
     }
 }
 
+pub struct WithCancellation<P> {
+    pub data: P,
+    pub token: CancellationToken,
+}
+
 /// Opaque JSON-RPC method handler.
 pub struct MethodHandler<P, R, E> {
-    f: Box<dyn Fn(P) -> LocalBoxFuture<'static, R>>,
+    f: Box<dyn Fn(WithCancellation<P>) -> LocalBoxFuture<'static, R>>,
     _marker: PhantomData<E>,
 }
 
 impl<P: FromParams, R: IntoResponse, E> MethodHandler<P, R, E> {
     fn new<F, Fut>(handler: F) -> Self
     where
-        F: Fn(P) -> Fut + 'static,
+        F: Fn(WithCancellation<P>) -> Fut + 'static,
         Fut: Future<Output = R> + 'static,
     {
         MethodHandler {
@@ -117,7 +128,7 @@ impl<P: FromParams, R: IntoResponse, E> MethodHandler<P, R, E> {
     }
 }
 
-impl<P, R, E> Service<Request> for MethodHandler<P, R, E>
+impl<P, R, E> Service<RequestWithCancellation> for MethodHandler<P, R, E>
 where
     P: FromParams,
     R: IntoResponse,
@@ -131,8 +142,8 @@ where
         Poll::Ready(Ok(()))
     }
 
-    fn call(&mut self, req: Request) -> Self::Future {
-        let (_, id, params) = req.into_parts();
+    fn call(&mut self, req: RequestWithCancellation) -> Self::Future {
+        let (_, id, params) = req.request.into_parts();
 
         match id {
             Some(_) if R::is_notification() => return future::ok(().into_response(id)).boxed(),
@@ -142,12 +153,17 @@ where
 
         let params = match P::from_params(params) {
             Ok(params) => params,
-            Err(err) => return future::ok(id.map(|id| Response::from_error(id, err))).boxed_local(),
+            Err(err) => {
+                return future::ok(id.map(|id| Response::from_error(id, err))).boxed_local()
+            }
         };
 
-        (self.f)(params)
-            .map(move |r| Ok(r.into_response(id)))
-            .boxed_local()
+        (self.f)(WithCancellation {
+            data: params,
+            token: req.token,
+        })
+        .map(move |r| Ok(r.into_response(id)))
+        .boxed_local()
     }
 }
 
@@ -163,38 +179,38 @@ where
 /// `async fn f(&self, params: P)`                       | Notification with parameters
 pub trait Method<S, P, R>: private::Sealed {
     /// The future response value.
-    type Future: Future<Output = R> ;
+    type Future: Future<Output = R>;
 
     /// Invokes the method with the given `server` receiver and parameters.
-    fn invoke(&self, server: S, params: P) -> Self::Future;
+    fn invoke(&self, server: S, params: P, token: CancellationToken) -> Self::Future;
 }
 
 /// Support parameter-less JSON-RPC methods.
 impl<F, S, R, Fut> Method<S, (), R> for F
 where
-    F: Fn(S) -> Fut,
+    F: Fn(S, CancellationToken) -> Fut,
     Fut: Future<Output = R>,
 {
     type Future = Fut;
 
     #[inline]
-    fn invoke(&self, server: S, _: ()) -> Self::Future {
-        self(server)
+    fn invoke(&self, server: S, _: (), token: CancellationToken) -> Self::Future {
+        self(server, token)
     }
 }
 
 /// Support JSON-RPC methods with `params`.
 impl<F, S, P, R, Fut> Method<S, (P,), R> for F
 where
-    F: Fn(S, P) -> Fut,
+    F: Fn(S, P, CancellationToken) -> Fut,
     P: DeserializeOwned,
-    Fut: Future<Output = R> ,
+    Fut: Future<Output = R>,
 {
     type Future = Fut;
 
     #[inline]
-    fn invoke(&self, server: S, params: (P,)) -> Self::Future {
-        self(server, params.0)
+    fn invoke(&self, server: S, params: (P,), token: CancellationToken) -> Self::Future {
+        self(server, params.0, token)
     }
 }
 
@@ -285,6 +301,8 @@ mod tests {
     use tower::layer::layer_fn;
     use tower::ServiceExt;
 
+    use crate::jsonrpc::Request;
+
     use super::*;
 
     #[derive(Deserialize, Serialize)]
@@ -296,17 +314,21 @@ mod tests {
     struct Mock;
 
     impl Mock {
-        async fn request(&self) -> Result<Value, Error> {
+        async fn request(&self, _token: CancellationToken) -> Result<Value, Error> {
             Ok(Value::Null)
         }
 
-        async fn request_params(&self, params: Params) -> Result<Params, Error> {
+        async fn request_params(
+            &self,
+            params: Params,
+            _token: CancellationToken,
+        ) -> Result<Params, Error> {
             Ok(params)
         }
 
-        async fn notification(&self) {}
+        async fn notification(&self, _token: CancellationToken) {}
 
-        async fn notification_params(&self, _params: Params) {}
+        async fn notification_params(&self, _params: Params, _token: CancellationToken) {}
     }
 
     #[tokio::test(flavor = "current_thread")]

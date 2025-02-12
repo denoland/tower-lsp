@@ -2,7 +2,7 @@
 
 pub(crate) use self::error::not_initialized_error;
 pub use self::error::{Error, ErrorCode, Result};
-pub use self::request::{Request, RequestBuilder};
+pub use self::request::{Request, RequestBuilder, RequestWithCancellation};
 pub use self::response::Response;
 pub(crate) use self::router::Router;
 pub use self::router::{FromParams, IntoResponse, Method};

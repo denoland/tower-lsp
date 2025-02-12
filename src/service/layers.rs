@@ -9,7 +9,7 @@ use tower::{Layer, Service};
 use tracing::{info, warn};
 
 use super::ExitedError;
-use crate::jsonrpc::{not_initialized_error, Error, Id, Request, Response};
+use crate::jsonrpc::{not_initialized_error, Error, Id, RequestWithCancellation, Response};
 
 use super::client::Client;
 use super::pending::Pending;
@@ -48,9 +48,9 @@ pub struct InitializeService<S> {
     state: Arc<ServerState>,
 }
 
-impl<S> Service<Request> for InitializeService<S>
+impl<S> Service<RequestWithCancellation> for InitializeService<S>
 where
-    S: Service<Request, Response = Option<Response>, Error = ExitedError>,
+    S: Service<RequestWithCancellation, Response = Option<Response>, Error = ExitedError>,
     S::Future: 'static,
 {
     type Response = S::Response;
@@ -61,7 +61,7 @@ where
         self.inner.poll_ready(cx)
     }
 
-    fn call(&mut self, req: Request) -> Self::Future {
+    fn call(&mut self, req: RequestWithCancellation) -> Self::Future {
         if self.state.get() == State::Uninitialized {
             let state = self.state.clone();
             let fut = self.inner.call(req);
@@ -78,7 +78,7 @@ where
             })
         } else {
             warn!("received duplicate `initialize` request, ignoring");
-            let (_, id, _) = req.into_parts();
+            let (_, id, _) = req.request.into_parts();
             future::ok(id.map(|id| Response::from_error(id, Error::invalid_request()))).boxed()
         }
     }
@@ -117,9 +117,9 @@ pub struct ShutdownService<S> {
     state: Arc<ServerState>,
 }
 
-impl<S> Service<Request> for ShutdownService<S>
+impl<S> Service<RequestWithCancellation> for ShutdownService<S>
 where
-    S: Service<Request, Response = Option<Response>, Error = ExitedError>,
+    S: Service<RequestWithCancellation, Response = Option<Response>, Error = ExitedError>,
     S::Future: Into<LocalBoxFuture<'static, Result<Option<Response>, S::Error>>> + 'static,
 {
     type Response = S::Response;
@@ -130,7 +130,7 @@ where
         self.inner.poll_ready(cx)
     }
 
-    fn call(&mut self, req: Request) -> Self::Future {
+    fn call(&mut self, req: RequestWithCancellation) -> Self::Future {
         match self.state.get() {
             State::Initialized => {
                 info!("shutdown request received, shutting down");
@@ -138,7 +138,7 @@ where
                 self.inner.call(req)
             }
             cur_state => {
-                let (_, id, _) = req.into_parts();
+                let (_, id, _) = req.request.into_parts();
                 future::ok(not_initialized_response(id, cur_state)).boxed()
             }
         }
@@ -187,7 +187,7 @@ pub struct ExitService<S> {
     _marker: PhantomData<S>,
 }
 
-impl<S> Service<Request> for ExitService<S> {
+impl<S> Service<RequestWithCancellation> for ExitService<S> {
     type Response = Option<Response>;
     type Error = ExitedError;
     type Future = future::Ready<Result<Self::Response, Self::Error>>;
@@ -200,7 +200,7 @@ impl<S> Service<Request> for ExitService<S> {
         }
     }
 
-    fn call(&mut self, _: Request) -> Self::Future {
+    fn call(&mut self, _: RequestWithCancellation) -> Self::Future {
         info!("exit notification received, stopping");
         self.state.set(State::Exited);
         self.pending.cancel_all();
@@ -238,9 +238,9 @@ pub struct NormalService<S> {
     state: Arc<ServerState>,
 }
 
-impl<S> Service<Request> for NormalService<S>
+impl<S> Service<RequestWithCancellation> for NormalService<S>
 where
-    S: Service<Request, Response = Option<Response>, Error = ExitedError>,
+    S: Service<RequestWithCancellation, Response = Option<Response>, Error = ExitedError>,
     S::Future: Into<LocalBoxFuture<'static, Result<Option<Response>, S::Error>>> + 'static,
 {
     type Response = S::Response;
@@ -251,11 +251,11 @@ where
         self.inner.poll_ready(cx)
     }
 
-    fn call(&mut self, req: Request) -> Self::Future {
+    fn call(&mut self, req: RequestWithCancellation) -> Self::Future {
         match self.state.get() {
             State::Initialized => self.inner.call(req),
             cur_state => {
-                let (_, id, _) = req.into_parts();
+                let (_, id, _) = req.request.into_parts();
                 future::ok(not_initialized_response(id, cur_state)).boxed()
             }
         }
@@ -278,9 +278,9 @@ impl<S> Cancellable<S> {
     }
 }
 
-impl<S> Service<Request> for Cancellable<S>
+impl<S> Service<RequestWithCancellation> for Cancellable<S>
 where
-    S: Service<Request, Response = Option<Response>, Error = ExitedError>,
+    S: Service<RequestWithCancellation, Response = Option<Response>, Error = ExitedError>,
     S::Future: 'static,
 {
     type Response = S::Response;
@@ -291,9 +291,12 @@ where
         self.inner.poll_ready(cx)
     }
 
-    fn call(&mut self, req: Request) -> Self::Future {
-        match req.id().cloned() {
-            Some(id) => self.pending.execute(id, self.inner.call(req)).boxed_local(),
+    fn call(&mut self, req: RequestWithCancellation) -> Self::Future {
+        match req.request.id().cloned() {
+            Some(id) => self
+                .pending
+                .execute(id, req.token.clone(), self.inner.call(req))
+                .boxed_local(),
             None => self.inner.call(req).boxed_local(),
         }
     }

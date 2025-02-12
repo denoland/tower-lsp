@@ -2,7 +2,7 @@
 
 pub use self::client::{progress, Client, ClientSocket, RequestStream, ResponseSink};
 
-pub(crate) use self::pending::Pending;
+pub use self::pending::Pending;
 pub(crate) use self::state::{ServerState, State};
 
 use std::fmt::{self, Debug, Display, Formatter};
@@ -14,7 +14,7 @@ use serde_json::Value;
 use tower::Service;
 
 use crate::jsonrpc::{
-    Error, ErrorCode, FromParams, IntoResponse, Method, Request, Response, Router,
+    Error, ErrorCode, FromParams, IntoResponse, Method, RequestWithCancellation, Response, Router,
 };
 use crate::LanguageServer;
 
@@ -61,7 +61,7 @@ pub struct LspService<S> {
 impl<S: LanguageServer> LspService<S> {
     /// Creates a new `LspService` with the given server backend, also returning a channel for
     /// server-to-client communication.
-    pub fn new<F>(init: F) -> (Self, ClientSocket)
+    pub fn new<F>(init: F) -> (Self, ClientSocket, Arc<Pending>)
     where
         F: FnOnce(Client) -> S,
     {
@@ -100,7 +100,7 @@ impl<S: LanguageServer> LspService<S> {
     }
 }
 
-impl<S: LanguageServer> Service<Request> for LspService<S> {
+impl<S: LanguageServer> Service<RequestWithCancellation> for LspService<S> {
     type Response = Option<Response>;
     type Error = ExitedError;
     type Future = LocalBoxFuture<'static, Result<Self::Response, Self::Error>>;
@@ -113,7 +113,7 @@ impl<S: LanguageServer> Service<Request> for LspService<S> {
         }
     }
 
-    fn call(&mut self, req: Request) -> Self::Future {
+    fn call(&mut self, req: RequestWithCancellation) -> Self::Future {
         if self.state.get() == State::Exited {
             return future::err(ExitedError(())).boxed();
         }
@@ -169,14 +169,14 @@ impl<S: LanguageServer> LspServiceBuilder<S> {
     ///
     /// ```rust
     /// use serde_json::{json, Value};
-    /// use tower_lsp::jsonrpc::Result;
-    /// use tower_lsp::lsp_types::*;
-    /// use tower_lsp::{LanguageServer, LspService};
+    /// use deno_tower_lsp::jsonrpc::Result;
+    /// use deno_tower_lsp::lsp_types::*;
+    /// use deno_tower_lsp::{CancellationToken, LanguageServer, LspService};
     ///
     /// struct Mock;
     ///
     /// // Implementation of `LanguageServer` omitted...
-    /// # #[tower_lsp::async_trait(?Send)]
+    /// # #[deno_tower_lsp::async_trait(?Send)]
     /// # impl LanguageServer for Mock {
     /// #     async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
     /// #         Ok(InitializeResult::default())
@@ -188,25 +188,25 @@ impl<S: LanguageServer> LspServiceBuilder<S> {
     /// # }
     ///
     /// impl Mock {
-    ///     async fn request(&self) -> Result<i32> {
+    ///     async fn request(&self, _token: CancellationToken) -> Result<i32> {
     ///         Ok(123)
     ///     }
     ///
-    ///     async fn request_params(&self, params: Vec<String>) -> Result<Value> {
+    ///     async fn request_params(&self, params: Vec<String>, _token: CancellationToken) -> Result<Value> {
     ///         Ok(json!({"num_elems":params.len()}))
     ///     }
     ///
-    ///     async fn notification(&self) {
+    ///     async fn notification(&self, _token: CancellationToken) {
     ///         // ...
     ///     }
     ///
-    ///     async fn notification_params(&self, params: Value) {
+    ///     async fn notification_params(&self, params: Value, _token: CancellationToken) {
     ///         // ...
     /// #       let _ = params;
     ///     }
     /// }
     ///
-    /// let (service, socket) = LspService::build(|_| Mock)
+    /// let (service, socket, pending) = LspService::build(|_| Mock)
     ///     .custom_method("custom/request", Mock::request)
     ///     .custom_method("custom/requestParams", Mock::request_params)
     ///     .custom_method("custom/notification", Mock::notification)
@@ -226,15 +226,16 @@ impl<S: LanguageServer> LspServiceBuilder<S> {
 
     /// Constructs the `LspService` and returns it, along with a channel for server-to-client
     /// communication.
-    pub fn finish(self) -> (LspService<S>, ClientSocket) {
+    pub fn finish(self) -> (LspService<S>, ClientSocket, Arc<Pending>) {
         let LspServiceBuilder {
             inner,
             state,
             socket,
+            pending,
             ..
         } = self;
 
-        (LspService { inner, state }, socket)
+        (LspService { inner, state }, socket, pending)
     }
 }
 
@@ -251,9 +252,11 @@ mod tests {
     use async_trait::async_trait;
     use lsp_types::*;
     use serde_json::json;
+    use tokio_util::sync::CancellationToken;
     use tower::ServiceExt;
 
     use super::*;
+    use crate::jsonrpc::Request;
     use crate::jsonrpc::Result;
 
     #[derive(Debug)]
@@ -270,18 +273,22 @@ mod tests {
         }
 
         // This handler should never resolve...
-        async fn code_action_resolve(&self, _: CodeAction) -> Result<CodeAction> {
+        async fn code_action_resolve(
+            &self,
+            _: CodeAction,
+            _: CancellationToken,
+        ) -> Result<CodeAction> {
             future::pending().await
         }
     }
 
     impl Mock {
-        async fn custom_request(&self, params: i32) -> Result<i32> {
+        async fn custom_request(&self, params: i32, _: CancellationToken) -> Result<i32> {
             Ok(params)
         }
     }
 
-    fn initialize_request(id: i64) -> Request {
+    fn initialize_request(id: i64) -> RequestWithCancellation {
         Request::build("initialize")
             .params(json!({"capabilities":{}}))
             .id(id)
@@ -290,7 +297,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn initializes_only_once() {
-        let (mut service, _) = LspService::new(|_| Mock);
+        let (mut service, _, _) = LspService::new(|_| Mock);
 
         let request = initialize_request(1);
 
@@ -305,7 +312,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn refuses_requests_after_shutdown() {
-        let (mut service, _) = LspService::new(|_| Mock);
+        let (mut service, _, _) = LspService::new(|_| Mock);
 
         let initialize = initialize_request(1);
         let response = service.ready().await.unwrap().call(initialize).await;
@@ -324,7 +331,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn exit_notification() {
-        let (mut service, _) = LspService::new(|_| Mock);
+        let (mut service, _, _) = LspService::new(|_| Mock);
 
         let exit = Request::build("exit").finish();
         let response = service.ready().await.unwrap().call(exit.clone()).await;
@@ -337,7 +344,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn cancels_pending_requests() {
-        let (mut service, _) = LspService::new(|_| Mock);
+        let (mut service, _, _) = LspService::new(|_| Mock);
 
         let initialize = initialize_request(1);
         let response = service.ready().await.unwrap().call(initialize).await;
@@ -348,6 +355,7 @@ mod tests {
             .params(json!({"title":""}))
             .id(1)
             .finish();
+        let pending_request_token = pending_request.token.clone();
 
         let cancel_request = Request::build("$/cancelRequest")
             .params(json!({"id":1i32}))
@@ -360,11 +368,12 @@ mod tests {
         let canceled = Response::from_error(1.into(), Error::request_cancelled());
         assert_eq!(pending_response, Ok(Some(canceled)));
         assert_eq!(cancel_response, Ok(None));
+        assert!(pending_request_token.is_cancelled());
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn serves_custom_requests() {
-        let (mut service, _) = LspService::build(|_| Mock)
+        let (mut service, _, _) = LspService::build(|_| Mock)
             .custom_method("custom", Mock::custom_request)
             .finish();
 
@@ -381,7 +390,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn get_inner() {
-        let (service, _) = LspService::build(|_| Mock).finish();
+        let (service, _, _) = LspService::build(|_| Mock).finish();
 
         service
             .inner()
