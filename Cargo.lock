@@ -164,6 +164,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "575f75dfd25738df5b91b8e43e14d44bda14637a58fae779fd2b064f8bf3e010"
 
 [[package]]
+name = "deno-tower-lsp-macros"
+version = "0.10.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "deno_tower_lsp"
 version = "0.3.0"
 dependencies = [
@@ -172,7 +181,7 @@ dependencies = [
  "auto_impl",
  "bytes",
  "dashmap",
- "deno_tower_lsp_macros",
+ "deno-tower-lsp-macros",
  "futures",
  "httparse",
  "lsp-types",
@@ -185,15 +194,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ws_stream_tungstenite",
-]
-
-[[package]]
-name = "deno_tower_lsp_macros"
-version = "0.10.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
 ]
 
 [[package]]

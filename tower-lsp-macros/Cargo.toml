@@ -1,5 +1,5 @@
 [package]
-name = "deno_tower_lsp_macros"
+name = "deno-tower-lsp-macros"
 version = "0.10.0"
 authors = ["Eyal Kalderon <ebkalderon@gmail.com>", "the Deno authors"]
 description = "This is a fork of https://crates.io/crates/tower-lsp macros, used in Deno. At the moment only floating patches."
