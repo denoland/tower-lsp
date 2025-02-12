@@ -962,7 +962,6 @@ pub trait LanguageServer: 'static {
     async fn completion(
         &self,
         params: CompletionParams,
-
         token: CancellationToken,
     ) -> Result<Option<CompletionResponse>> {
         let _ = params;
@@ -979,7 +978,6 @@ pub trait LanguageServer: 'static {
     async fn completion_resolve(
         &self,
         params: CompletionItem,
-
         token: CancellationToken,
     ) -> Result<CompletionItem> {
         let _ = params;
@@ -1062,7 +1060,6 @@ pub trait LanguageServer: 'static {
     async fn signature_help(
         &self,
         params: SignatureHelpParams,
-
         token: CancellationToken,
     ) -> Result<Option<SignatureHelp>> {
         let _ = params;
@@ -1151,7 +1148,6 @@ pub trait LanguageServer: 'static {
     async fn code_action_resolve(
         &self,
         params: CodeAction,
-
         token: CancellationToken,
     ) -> Result<CodeAction> {
         let _ = params;
@@ -1222,7 +1218,6 @@ pub trait LanguageServer: 'static {
     async fn formatting(
         &self,
         params: DocumentFormattingParams,
-
         token: CancellationToken,
     ) -> Result<Option<Vec<TextEdit>>> {
         let _ = params;
@@ -1272,7 +1267,6 @@ pub trait LanguageServer: 'static {
     async fn rename(
         &self,
         params: RenameParams,
-
         token: CancellationToken,
     ) -> Result<Option<WorkspaceEdit>> {
         let _ = params;
@@ -1372,7 +1366,6 @@ pub trait LanguageServer: 'static {
     async fn symbol_resolve(
         &self,
         params: WorkspaceSymbol,
-
         token: CancellationToken,
     ) -> Result<WorkspaceSymbol> {
         let _ = params;
