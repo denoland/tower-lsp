@@ -13,12 +13,13 @@ use super::ExitedError;
 use crate::jsonrpc::{Error, Id, Response};
 
 /// A hashmap containing pending server requests, keyed by request ID.
-pub struct Pending(Arc<DashMap<Id, CancellationToken>>);
+#[derive(Default)]
+pub struct Pending(DashMap<Id, CancellationToken>);
 
 impl Pending {
     /// Creates a new pending server requests map.
     pub fn new() -> Self {
-        Pending(Arc::new(DashMap::new()))
+        Pending(DashMap::new())
     }
 
     /// Executes the given async request handler, keyed by the given request ID.
@@ -26,7 +27,7 @@ impl Pending {
     /// If a cancel request is issued before the future is finished resolving, this will resolve to
     /// a "canceled" error response, and the pending request handler future will be dropped.
     pub fn execute<F>(
-        &self,
+        self: &Arc<Self>,
         id: Id,
         token: CancellationToken,
         fut: F,
@@ -37,14 +38,15 @@ impl Pending {
         if let Entry::Vacant(entry) = self.0.entry(id.clone()) {
             entry.insert(token.clone());
 
-            let requests = self.0.clone();
+            let requests = self.clone();
             Either::Left(async move {
                 let maybe_result = tokio::select! {
                     biased;
                     _ = token.cancelled() => None,
                     result = fut => Some(result),
                 };
-                requests.remove(&id); // Remove abort handle now to avoid double cancellation.
+
+                requests.0.remove(&id); // Remove token to avoid double cancellation.
 
                 match maybe_result {
                     Some(result) => result,
@@ -101,7 +103,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn executes_server_request() {
-        let pending = Pending::new();
+        let pending = Arc::new(Pending::new());
 
         let id = Id::Number(1);
         let id2 = id.clone();
@@ -116,7 +118,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn cancels_server_request() {
-        let pending = Pending::new();
+        let pending = Arc::new(Pending::new());
 
         let id = Id::Number(1);
         let token = CancellationToken::new();

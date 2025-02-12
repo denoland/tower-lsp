@@ -154,6 +154,8 @@ async fn main() {
 
     let (read, write) = tokio::io::split(stream);
 
-    let (service, socket) = LspService::new(|client| Backend { client });
-    Server::new(read, write, socket).serve(service).await;
+    let (service, socket, pending) = LspService::new(|client| Backend { client });
+    Server::new(read, write, socket, pending)
+        .serve(service)
+        .await;
 }

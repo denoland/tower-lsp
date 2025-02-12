@@ -2,7 +2,7 @@
 
 pub use self::client::{progress, Client, ClientSocket, RequestStream, ResponseSink};
 
-pub(crate) use self::pending::Pending;
+pub use self::pending::Pending;
 pub(crate) use self::state::{ServerState, State};
 
 use std::fmt::{self, Debug, Display, Formatter};
@@ -61,7 +61,7 @@ pub struct LspService<S> {
 impl<S: LanguageServer> LspService<S> {
     /// Creates a new `LspService` with the given server backend, also returning a channel for
     /// server-to-client communication.
-    pub fn new<F>(init: F) -> (Self, ClientSocket)
+    pub fn new<F>(init: F) -> (Self, ClientSocket, Arc<Pending>)
     where
         F: FnOnce(Client) -> S,
     {
@@ -206,7 +206,7 @@ impl<S: LanguageServer> LspServiceBuilder<S> {
     ///     }
     /// }
     ///
-    /// let (service, socket) = LspService::build(|_| Mock)
+    /// let (service, socket, pending) = LspService::build(|_| Mock)
     ///     .custom_method("custom/request", Mock::request)
     ///     .custom_method("custom/requestParams", Mock::request_params)
     ///     .custom_method("custom/notification", Mock::notification)
@@ -226,15 +226,16 @@ impl<S: LanguageServer> LspServiceBuilder<S> {
 
     /// Constructs the `LspService` and returns it, along with a channel for server-to-client
     /// communication.
-    pub fn finish(self) -> (LspService<S>, ClientSocket) {
+    pub fn finish(self) -> (LspService<S>, ClientSocket, Arc<Pending>) {
         let LspServiceBuilder {
             inner,
             state,
             socket,
+            pending,
             ..
         } = self;
 
-        (LspService { inner, state }, socket)
+        (LspService { inner, state }, socket, pending)
     }
 }
 
@@ -296,7 +297,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn initializes_only_once() {
-        let (mut service, _) = LspService::new(|_| Mock);
+        let (mut service, _, _) = LspService::new(|_| Mock);
 
         let request = initialize_request(1);
 
@@ -311,7 +312,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn refuses_requests_after_shutdown() {
-        let (mut service, _) = LspService::new(|_| Mock);
+        let (mut service, _, _) = LspService::new(|_| Mock);
 
         let initialize = initialize_request(1);
         let response = service.ready().await.unwrap().call(initialize).await;
@@ -330,7 +331,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn exit_notification() {
-        let (mut service, _) = LspService::new(|_| Mock);
+        let (mut service, _, _) = LspService::new(|_| Mock);
 
         let exit = Request::build("exit").finish();
         let response = service.ready().await.unwrap().call(exit.clone()).await;
@@ -343,7 +344,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn cancels_pending_requests() {
-        let (mut service, _) = LspService::new(|_| Mock);
+        let (mut service, _, _) = LspService::new(|_| Mock);
 
         let initialize = initialize_request(1);
         let response = service.ready().await.unwrap().call(initialize).await;
@@ -354,6 +355,7 @@ mod tests {
             .params(json!({"title":""}))
             .id(1)
             .finish();
+        let pending_request_token = pending_request.token.clone();
 
         let cancel_request = Request::build("$/cancelRequest")
             .params(json!({"id":1i32}))
@@ -366,11 +368,12 @@ mod tests {
         let canceled = Response::from_error(1.into(), Error::request_cancelled());
         assert_eq!(pending_response, Ok(Some(canceled)));
         assert_eq!(cancel_response, Ok(None));
+        assert!(pending_request_token.is_cancelled());
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn serves_custom_requests() {
-        let (mut service, _) = LspService::build(|_| Mock)
+        let (mut service, _, _) = LspService::build(|_| Mock)
             .custom_method("custom", Mock::custom_request)
             .finish();
 
@@ -387,7 +390,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn get_inner() {
-        let (service, _) = LspService::build(|_| Mock).finish();
+        let (service, _, _) = LspService::build(|_| Mock).finish();
 
         service
             .inner()

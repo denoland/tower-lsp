@@ -65,8 +65,8 @@
 //! #   let message = r#"{"jsonrpc":"2.0","method":"exit"}"#;
 //! #   let (stdin, stdout) = (Cursor::new(format!("Content-Length: {}\r\n\r\n{}", message.len(), message).into_bytes()), Cursor::new(Vec::new()));
 //!
-//!     let (service, socket) = LspService::new(|client| Backend { client });
-//!     Server::new(stdin, stdout, socket).serve(service).await;
+//!     let (service, socket, pending) = LspService::new(|client| Backend { client });
+//!     Server::new(stdin, stdout, socket, pending).serve(service).await;
 //! }
 //! ```
 
@@ -83,6 +83,7 @@ pub use tokio_util::sync::CancellationToken;
 pub use self::service::progress::{
     Bounded, Cancellable, NotCancellable, OngoingProgress, Progress, Unbounded,
 };
+pub use self::service::Pending;
 pub use self::service::{Client, ClientSocket, ExitedError, LspService, LspServiceBuilder};
 pub use self::transport::{Loopback, Server};
 

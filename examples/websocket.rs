@@ -135,6 +135,8 @@ async fn main() {
     let (stream, _) = listener.accept().await.unwrap();
     let (read, write) = tokio::io::split(WsStream::new(accept_async(stream).await.unwrap()));
 
-    let (service, socket) = LspService::new(|client| Backend { client });
-    Server::new(read, write, socket).serve(service).await;
+    let (service, socket, pending) = LspService::new(|client| Backend { client });
+    Server::new(read, write, socket, pending)
+        .serve(service)
+        .await;
 }
