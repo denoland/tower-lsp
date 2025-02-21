@@ -163,6 +163,8 @@ where
                             return;
                         }
 
+                        let is_exit = req.method() == "exit";
+
                         let fut = service
                             .call(RequestWithCancellation {
                                 request: req,
@@ -174,6 +176,10 @@ where
                             });
 
                         server_tasks_tx.send(fut).await.unwrap();
+
+                        if is_exit {
+                            break;
+                        }
                     }
                     Ok(Message::Response(res)) => {
                         if let Err(err) = client_responses.send(res).await {
@@ -190,7 +196,10 @@ where
             }
         };
 
-        join!(future, print_output, process_server_responses, message_fut);
+        tokio::select! {
+            (..) = async { join!(future, print_output, process_server_responses, futures::future::pending::<()>()) } => unreachable!(),
+            () = message_fut => {},
+        };
 
         client_abort.abort();
     }
