@@ -196,6 +196,9 @@ where
             }
         };
 
+        // `message_fut` will resolve on an exit notification or if stdin
+        // closes. Don't abort it in any case, hence `future::pending()` in the
+        // other branch. But abort the other futures once it completes.
         tokio::select! {
             (..) = async { join!(future, print_output, process_server_responses, futures::future::pending::<()>()) } => unreachable!(),
             () = message_fut => {},
