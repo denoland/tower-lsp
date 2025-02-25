@@ -68,7 +68,7 @@ impl Pending {
     pub fn cancel(&self, id: &Id) {
         if let Some((_, token)) = self.0.remove(id) {
             token.cancel();
-            info!("successfully cancelled request with ID: {}", id);
+            debug!("successfully cancelled request with ID: {}", id);
         } else {
             debug!(
                 "client asked to cancel request {}, but no such pending request exists, ignoring",
