@@ -7,7 +7,7 @@ use std::sync::Arc;
 use dashmap::{mapref::entry::Entry, DashMap};
 use futures::future::Either;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info};
+use tracing::debug;
 
 use super::ExitedError;
 use crate::jsonrpc::{Error, Id, Response};
